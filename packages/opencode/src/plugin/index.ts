@@ -150,6 +150,10 @@ const layer = Layer.effect(
           ...(serverUrl ? {} : { fetch: async (...args) => Server.Default().app.fetch(...args) }),
         })
         const cfg = yield* config.get()
+        yield* Effect.logInfo("config loaded", {
+          plugins: cfg.plugin_origins?.map((p) => `${p.spec}`).join(", ") ?? "none",
+          count: cfg.plugin_origins?.length ?? 0,
+        })
         const input: PluginInput = {
           client,
           project: ctx.project,
@@ -167,7 +171,10 @@ const layer = Layer.effect(
           $: typeof Bun === "undefined" ? undefined : Bun.$,
         }
 
-        for (const plugin of flags.disableDefaultPlugins ? [] : internalPlugins(flags)) {
+        const internalList = flags.disableDefaultPlugins ? [] : internalPlugins(flags)
+        yield* Effect.logInfo("loading internal plugins", { count: internalList.length })
+        for (const plugin of internalList) {
+          yield* Effect.logInfo("loading internal plugin", { name: plugin.name })
           const init = yield* Effect.tryPromise({
             try: () => plugin(input),
             catch: errorMessage,
@@ -176,6 +183,7 @@ const layer = Layer.effect(
             Effect.option,
           )
           if (init._tag === "Some") hooks.push(init.value)
+          yield* Effect.logInfo("internal plugin loaded", { name: plugin.name })
         }
 
         const plugins = flags.pure ? [] : (cfg.plugin_origins ?? [])
@@ -183,6 +191,7 @@ const layer = Layer.effect(
         }
         if (plugins.length) yield* config.waitForDependencies()
 
+        yield* Effect.logInfo("loading external plugins", { count: plugins.length })
         const loaded = yield* Effect.promise(() =>
           PluginLoader.loadExternal({
             items: plugins,
@@ -216,8 +225,11 @@ const layer = Layer.effect(
             },
           }),
         )
+        yield* Effect.logInfo("external plugins loaded", { count: loaded.length })
         for (const load of loaded) {
           if (!load) continue
+
+          yield* Effect.logInfo("applying plugin", { spec: load.spec, path: load.target })
 
           // Keep plugin execution sequential so hook registration and execution
           // order remains deterministic across plugin runs.
@@ -242,6 +254,7 @@ const layer = Layer.effect(
         }
 
         // Notify plugins of current config
+        yield* Effect.logInfo("calling plugin config hooks", { count: hooks.length })
         for (const hook of hooks) {
           yield* Effect.tryPromise({
             try: () => Promise.resolve((hook as any).config?.(cfg)),
