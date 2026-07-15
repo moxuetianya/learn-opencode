@@ -1,8 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(git clone:*)",
-      "Read(//tmp/**)"
-    ]
-  }
-}
