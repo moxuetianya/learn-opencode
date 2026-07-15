@@ -17,5 +17,8 @@
     "github-triage": false,
     "github-pr-search": false,
   },
-  "plugin": ["@devtheops/opencode-plugin-otel"]
+  "plugin": [
+    "@devtheops/opencode-plugin-otel",
+      "superpowers@git+https://github.com/obra/superpowers.git"
+  ]
 }

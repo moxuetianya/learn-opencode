@@ -122,17 +122,24 @@ const layer = Layer.effect(
         }
       })()
 
-      if (yield* afs.existsSafe(path.join(dir, "node_modules", name))) {
-        return resolveEntryPoint(name, path.join(dir, "node_modules", name))
+      const nodeModulesPath = path.join(dir, "node_modules", name)
+      if (yield* afs.existsSafe(nodeModulesPath)) {
+        yield* Effect.logInfo("plugin cache hit, skipping download", { pkg, dir: nodeModulesPath })
+        return resolveEntryPoint(name, nodeModulesPath)
       }
 
+      yield* Effect.logInfo("installing plugin", { pkg, dir })
       const tree = yield* reify({ dir, add: [pkg] })
       const first = tree.edgesOut.values().next().value?.to
       if (!first) {
         const result = resolveEntryPoint(name, path.join(dir, "node_modules", name))
-        if (result.entrypoint) return result
+        if (result.entrypoint) {
+          yield* Effect.logInfo("plugin installed", { pkg, dir: result.directory })
+          return result
+        }
         return yield* new InstallFailedError({ add: [pkg], dir })
       }
+      yield* Effect.logInfo("plugin installed", { pkg, dir: first.path })
       return resolveEntryPoint(first.name, first.path)
     }, Effect.scoped)
 
