@@ -144,17 +144,23 @@ const layer = Layer.effect(
     }, Effect.scoped)
 
     const install: Interface["install"] = Effect.fn("Npm.install")(function* (dir, input) {
+      yield* Effect.logDebug(`install called dir=${dir} add=${input?.add.map((p) => p.name + "@" + (p.version || "latest")).join(",")}`)
+
       const canWrite = yield* afs.access(dir, { writable: true }).pipe(
         Effect.as(true),
         Effect.orElseSucceed(() => false),
       )
-      if (!canWrite) return
+      if (!canWrite) {
+        yield* Effect.logDebug(`SKIP: dir not writable: ${dir}`)
+        return
+      }
 
       const add = input?.add.map((pkg) => [pkg.name, pkg.version].filter(Boolean).join("@")) ?? []
       if (
         yield* Effect.gen(function* () {
           const nodeModulesExists = yield* afs.existsSafe(path.join(dir, "node_modules"))
           if (!nodeModulesExists) {
+            yield* Effect.logDebug(`INSTALL: node_modules missing, running reify: ${dir}`)
             yield* reify({ add, dir })
             return true
           }
@@ -185,12 +191,16 @@ const layer = Layer.effect(
           ...Object.keys(root?.optionalDependencies || {}),
         ])
 
+        yield* Effect.logDebug(`dirty-check dir=${dir} declared=[${[...declared].join(",")}] locked=[${[...locked].join(",")}] lockVersion=${lockAny?.lockfileVersion}`)
+
         for (const name of declared) {
           if (!locked.has(name)) {
+            yield* Effect.logDebug(`INSTALL: dep "${name}" missing from lock, running reify: ${dir}`)
             yield* reify({ dir, add })
             return
           }
         }
+        yield* Effect.logDebug(`SKIP: all deps satisfied, no install needed: ${dir}`)
       }).pipe(Effect.withSpan("Npm.checkDirty"))
 
       return

@@ -190,9 +190,15 @@ const layer = Layer.effect(
         const plugins = flags.pure ? [] : (cfg.plugin_origins ?? [])
         if (flags.pure && cfg.plugin_origins?.length) {
         }
-        if (plugins.length) yield* config.waitForDependencies()
+        if (plugins.length) {
+          const tWait = Date.now()
+          yield* Effect.logDebug(`[TIME] waitForDeps start plugins=${plugins.length}`)
+          yield* config.waitForDependencies()
+          yield* Effect.logDebug(`[TIME] waitForDeps done: ${Date.now() - tWait}ms`)
+        }
 
         yield* Effect.logInfo("loading external plugins", { count: plugins.length })
+        const tLoadExt = Date.now()
         const logEntries: Array<{ message: string; data?: Record<string, unknown> }> = []
         const loaded = yield* Effect.promise(() =>
           PluginLoader.loadExternal({
@@ -231,6 +237,7 @@ const layer = Layer.effect(
             },
           }),
         )
+        yield* Effect.logDebug(`[TIME] PluginLoader.loadExternal done: ${Date.now() - tLoadExt}ms count=${loaded.length}`)
         yield* Effect.logInfo("external plugins load result", {
           total: plugins.length,
           loaded: loaded.length,
