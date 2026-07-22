@@ -107,23 +107,18 @@ function getLegacyPlugins(mod: Record<string, unknown>) {
   return result
 }
 
-const applyPlugin = Effect.fnUntraced(function* (load: PluginLoader.Loaded, input: PluginInput, hooks: Hooks[]) {
+async function applyPlugin(load: PluginLoader.Loaded, input: PluginInput, hooks: Hooks[]) {
   const plugin = readV1Plugin(load.mod, load.spec, "server", "detect")
   if (plugin) {
-    yield* Effect.logInfo("applying v1 plugin entry", { spec: load.spec })
-    const pluginId = readPluginId(plugin.id, load.spec)
-    yield* Effect.logInfo("resolving v1 plugin identity", { spec: load.spec, id: String(pluginId) })
-    yield* Effect.promise(() => resolvePluginId(load.source, load.spec, load.target, pluginId, load.pkg))
-    hooks.push(yield* Effect.promise(() => (plugin as PluginModule).server(input, load.options)))
+    await resolvePluginId(load.source, load.spec, load.target, readPluginId(plugin.id, load.spec), load.pkg)
+    hooks.push(await (plugin as PluginModule).server(input, load.options))
     return
   }
 
-  const legacyPlugins = getLegacyPlugins(load.mod)
-  yield* Effect.logInfo("applying legacy plugin exports", { spec: load.spec, count: legacyPlugins.length })
-  for (const server of legacyPlugins) {
-    hooks.push(yield* Effect.promise(() => server(input, load.options)))
+  for (const server of getLegacyPlugins(load.mod)) {
+    hooks.push(await server(input, load.options))
   }
-})
+}
 
 const layer = Layer.effect(
   Service,
@@ -151,10 +146,6 @@ const layer = Layer.effect(
           ...(serverUrl ? {} : { fetch: async (...args) => Server.Default().app.fetch(...args) }),
         })
         const cfg = yield* config.get()
-        yield* Effect.logInfo("config loaded", {
-          plugins: cfg.plugin_origins?.map((p) => `${p.spec}`).join(", ") ?? "none",
-          count: cfg.plugin_origins?.length ?? 0,
-        })
         const input: PluginInput = {
           client,
           project: ctx.project,
@@ -172,10 +163,7 @@ const layer = Layer.effect(
           $: typeof Bun === "undefined" ? undefined : Bun.$,
         }
 
-        const internalList = flags.disableDefaultPlugins ? [] : internalPlugins(flags)
-        yield* Effect.logInfo("loading internal plugins", { count: internalList.length })
-        for (const plugin of internalList) {
-          yield* Effect.logInfo("loading internal plugin", { name: plugin.name })
+        for (const plugin of flags.disableDefaultPlugins ? [] : internalPlugins(flags)) {
           const init = yield* Effect.tryPromise({
             try: () => plugin(input),
             catch: errorMessage,
@@ -184,33 +172,25 @@ const layer = Layer.effect(
             Effect.option,
           )
           if (init._tag === "Some") hooks.push(init.value)
-          yield* Effect.logInfo("internal plugin loaded", { name: plugin.name })
         }
 
         const plugins = flags.pure ? [] : (cfg.plugin_origins ?? [])
         if (flags.pure && cfg.plugin_origins?.length) {
         }
         if (plugins.length) {
+          yield* Effect.logDebug(`[TRACE] waitForDeps start plugins=${plugins.length}`)
           const tWait = Date.now()
-          yield* Effect.logDebug(`[TIME] waitForDeps start plugins=${plugins.length}`)
           yield* config.waitForDependencies()
-          yield* Effect.logDebug(`[TIME] waitForDeps done: ${Date.now() - tWait}ms`)
+          yield* Effect.logDebug(`[TRACE] waitForDeps done time=${Date.now() - tWait}ms`)
         }
 
-        yield* Effect.logInfo("loading external plugins", { count: plugins.length })
-        const tLoadExt = Date.now()
-        const logEntries: Array<{ message: string; data?: Record<string, unknown> }> = []
         const loaded = yield* Effect.promise(() =>
           PluginLoader.loadExternal({
             items: plugins,
             kind: "server",
             report: {
-              start(candidate) {
-                logEntries.push({ message: "plugin resolve start", data: { spec: candidate.plan.spec } })
-              },
-              missing(candidate, _retry, message) {
-                logEntries.push({ message: "plugin entry not found", data: { spec: candidate.plan.spec, reason: message } })
-              },
+              start(candidate) {},
+              missing(candidate, _retry, message) {},
               error(candidate, _retry, stage, error, resolved) {
                 const spec = candidate.plan.spec
                 const cause = error instanceof Error ? (error.cause ?? error) : error
@@ -237,36 +217,32 @@ const layer = Layer.effect(
             },
           }),
         )
-        yield* Effect.logDebug(`[TIME] PluginLoader.loadExternal done: ${Date.now() - tLoadExt}ms count=${loaded.length}`)
-        yield* Effect.logInfo("external plugins load result", {
-          total: plugins.length,
-          loaded: loaded.length,
-          skipped: plugins.length - loaded.length,
-        })
-        for (const entry of logEntries) {
-          yield* Effect.logInfo(entry.message, entry.data ?? {})
-        }
         for (const load of loaded) {
           if (!load) continue
 
-          yield* Effect.logInfo("applying plugin", {
-            spec: load.spec,
-            source: load.source,
-            target: load.target,
-            entry: load.entry,
-          })
-
           // Keep plugin execution sequential so hook registration and execution
           // order remains deterministic across plugin runs.
-          yield* applyPlugin(load, input, hooks).pipe(
-            Effect.tapError((error) => Effect.logError("failed to load plugin", { path: load.spec, error: errorMessage(error) })),
-            Effect.tap(() => Effect.logInfo("plugin applied", { spec: load.spec })),
-            Effect.catch(() => Effect.void),
+          yield* Effect.tryPromise({
+            try: () => applyPlugin(load, input, hooks),
+            catch: (err) => {
+              const message = errorMessage(err)
+              return message
+            },
+          }).pipe(
+            Effect.tapError((error) => Effect.logError("failed to load plugin", { path: load.spec, error })),
+            Effect.catch(() => {
+              // TODO: make proper events for this
+              // events.publish(Session.Event.Error, {
+              //   error: new NamedError.Unknown({
+              //     message: `Failed to load plugin ${load.spec}: ${message}`,
+              //   }).toObject(),
+              // })
+              return Effect.void
+            }),
           )
         }
 
         // Notify plugins of current config
-        yield* Effect.logInfo("calling plugin config hooks", { count: hooks.length })
         for (const hook of hooks) {
           yield* Effect.tryPromise({
             try: () => Promise.resolve((hook as any).config?.(cfg)),

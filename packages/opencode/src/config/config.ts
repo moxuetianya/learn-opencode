@@ -414,49 +414,30 @@ const layer = Layer.effect(
         result.plugin = result.plugin || []
 
         const directories = yield* ConfigPaths.directories(ctx.directory, ctx.worktree)
+        yield* Effect.logDebug(`[TRACE] directories count=${directories.length} items=[${directories.join(" | ")}]`)
 
         if (Flag.OPENCODE_CONFIG_DIR) {
           yield* Effect.logDebug("loading config from OPENCODE_CONFIG_DIR", { path: Flag.OPENCODE_CONFIG_DIR })
         }
 
         const deps: Fiber.Fiber<void>[] = []
-        const tStart = Date.now()
-
-        yield* Effect.logDebug(`[INSTALL-DIRS] directories=${directories.length}: [${directories.join(" | ")}]`)
 
         for (const dir of directories) {
           const tDir = Date.now()
           if (dir.endsWith(".opencode") || dir === Flag.OPENCODE_CONFIG_DIR) {
             for (const file of ["opencode.json", "opencode.jsonc"]) {
               const source = path.join(dir, file)
-              yield* Effect.logDebug(`loading config from ${source}`)
-              const t0 = Date.now()
+              yield* Effect.logDebug(`[TRACE] loading config file=${source}`)
               yield* merge(source, yield* loadFile(source, authEnv))
               result.agent ??= {}
               result.mode ??= {}
               result.plugin ??= []
-              yield* Effect.logDebug(`[TIME] loadFile ${source}: ${Date.now() - t0}ms`)
             }
           }
 
-          const t1 = Date.now()
           yield* ensureGitignore(dir).pipe(Effect.orDie)
-          yield* Effect.logDebug(`[TIME] ensureGitignore ${dir}: ${Date.now() - t1}ms`)
 
-          const hasJson = yield* fs.existsSafe(path.join(dir, "opencode.json"))
-          const hasJsonc = yield* fs.existsSafe(path.join(dir, "opencode.jsonc"))
-          const hasPluginDir = yield* fs.existsSafe(path.join(dir, "plugins"))
-          const hasPluginsDir = yield* fs.existsSafe(path.join(dir, "plugin"))
-          const endsWithOpenCode = dir.endsWith(".opencode")
-          const isFlagDir = dir === Flag.OPENCODE_CONFIG_DIR
-          const hasConfig = endsWithOpenCode || isFlagDir || hasJson || hasJsonc
-          const hasPlugins = hasPluginDir || hasPluginsDir
-          yield* Effect.logDebug(`[CONFIG-DBG] dir=${dir} endsWithOpenCode=${endsWithOpenCode} isFlagDir=${isFlagDir} hasJson=${hasJson} hasJsonc=${hasJsonc} hasPluginDir=${hasPluginDir} => hasConfig=${hasConfig} hasPlugins=${hasPlugins}`)
-          if (!hasConfig && !hasPlugins) {
-            yield* Effect.logDebug(`[CONFIG-DBG] skipping npm install`)
-            continue
-          }
-
+          yield* Effect.logDebug(`[TRACE] npmSvc.install start dir=${dir}`)
           const dep = yield* npmSvc
             .install(dir, {
               add: [
@@ -483,10 +464,10 @@ const layer = Layer.effect(
           result.agent = mergeDeep(result.agent ?? {}, yield* Effect.promise(() => ConfigAgent.loadMode(dir)))
           // Auto-discovered plugins under `.opencode/plugin(s)` are already local files, so ConfigPlugin.load
           // returns normalized Specs and we only need to attach origin metadata here.
-          const tPlug = Date.now()
           const list = yield* Effect.promise(() => ConfigPlugin.load(dir))
-          yield* Effect.logDebug(`[TIME] ConfigPlugin.load ${dir}: ${Date.now() - tPlug}ms found=${list.length}`)
+          yield* Effect.logDebug(`[TRACE] ConfigPlugin.load dir=${dir} found=${list?.length ?? 0}`)
           yield* mergePluginOrigins(dir, list)
+          yield* Effect.logDebug(`[TRACE] dir done dir=${dir} time=${Date.now() - tDir}ms`)
         }
 
         if (process.env.OPENCODE_CONFIG_CONTENT) {

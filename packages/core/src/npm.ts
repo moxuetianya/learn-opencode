@@ -91,6 +91,8 @@ const layer = Layer.effect(
           savePrefix: "",
           ignoreScripts: true,
         })
+        yield* Effect.logDebug(`[TRACE] reify start dir=${input.dir} add=[${add.join(",")}]`)
+        const tReify = Date.now()
         return yield* Effect.tryPromise({
           try: () =>
             arborist.reify({
@@ -107,6 +109,7 @@ const layer = Layer.effect(
             }),
         }) as Effect.Effect<ArboristTree, InstallFailedError>
       }).pipe(
+        Effect.tap(() => Effect.logDebug(`[TRACE] reify done dir=${input.dir} time=${Date.now() - tReify}ms`)),
         Effect.withSpan("Npm.reify", {
           attributes: input,
         }),
@@ -122,36 +125,30 @@ const layer = Layer.effect(
         }
       })()
 
-      const nodeModulesPath = path.join(dir, "node_modules", name)
-      if (yield* afs.existsSafe(nodeModulesPath)) {
-        yield* Effect.logInfo("plugin cache hit, skipping download", { pkg, dir: nodeModulesPath })
-        return resolveEntryPoint(name, nodeModulesPath)
+      if (yield* afs.existsSafe(path.join(dir, "node_modules", name))) {
+        return resolveEntryPoint(name, path.join(dir, "node_modules", name))
       }
 
-      yield* Effect.logInfo("installing plugin", { pkg, dir })
       const tree = yield* reify({ dir, add: [pkg] })
       const first = tree.edgesOut.values().next().value?.to
       if (!first) {
         const result = resolveEntryPoint(name, path.join(dir, "node_modules", name))
-        if (result.entrypoint) {
-          yield* Effect.logInfo("plugin installed", { pkg, dir: result.directory })
-          return result
-        }
+        if (result.entrypoint) return result
         return yield* new InstallFailedError({ add: [pkg], dir })
       }
-      yield* Effect.logInfo("plugin installed", { pkg, dir: first.path })
       return resolveEntryPoint(first.name, first.path)
     }, Effect.scoped)
 
     const install: Interface["install"] = Effect.fn("Npm.install")(function* (dir, input) {
-      yield* Effect.logDebug(`install called dir=${dir} add=${input?.add.map((p) => p.name + "@" + (p.version || "latest")).join(",")}`)
+      const addPkgs = input?.add.map((p) => `${p.name}@${p.version || "latest"}`).join(",") ?? "none"
+      yield* Effect.logDebug(`[TRACE] Npm.install dir=${dir} add=[${addPkgs}]`)
 
       const canWrite = yield* afs.access(dir, { writable: true }).pipe(
         Effect.as(true),
         Effect.orElseSucceed(() => false),
       )
       if (!canWrite) {
-        yield* Effect.logDebug(`SKIP: dir not writable: ${dir}`)
+        yield* Effect.logDebug(`[TRACE] Npm.install skip dir=${dir} reason=not-writable`)
         return
       }
 
@@ -160,7 +157,7 @@ const layer = Layer.effect(
         yield* Effect.gen(function* () {
           const nodeModulesExists = yield* afs.existsSafe(path.join(dir, "node_modules"))
           if (!nodeModulesExists) {
-            yield* Effect.logDebug(`INSTALL: node_modules missing, running reify: ${dir}`)
+            yield* Effect.logDebug(`[TRACE] Npm.install reify dir=${dir} reason=no-node_modules`)
             yield* reify({ add, dir })
             return true
           }
@@ -191,16 +188,16 @@ const layer = Layer.effect(
           ...Object.keys(root?.optionalDependencies || {}),
         ])
 
-        yield* Effect.logDebug(`dirty-check dir=${dir} declared=[${[...declared].join(",")}] locked=[${[...locked].join(",")}] lockVersion=${lockAny?.lockfileVersion}`)
+        yield* Effect.logDebug(`[TRACE] Npm.install dirty-check dir=${dir} declared=[${[...declared].join(",")}] locked=[${[...locked].join(",")}]`)
 
         for (const name of declared) {
           if (!locked.has(name)) {
-            yield* Effect.logDebug(`INSTALL: dep "${name}" missing from lock, running reify: ${dir}`)
+            yield* Effect.logDebug(`[TRACE] Npm.install reify dir=${dir} reason=dirty-${name}`)
             yield* reify({ dir, add })
             return
           }
         }
-        yield* Effect.logDebug(`SKIP: all deps satisfied, no install needed: ${dir}`)
+        yield* Effect.logDebug(`[TRACE] Npm.install done dir=${dir} reason=deps-satisfied`)
       }).pipe(Effect.withSpan("Npm.checkDirty"))
 
       return
