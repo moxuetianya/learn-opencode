@@ -77,8 +77,9 @@ const layer = Layer.effect(
     const fs = yield* FileSystem.FileSystem
     const flock = yield* EffectFlock.Service
     const directory = (pkg: string) => path.join(global.cache, "packages", sanitize(pkg))
-    const reify = (input: { dir: string; add?: string[] }) =>
-      Effect.gen(function* () {
+    const reify = (input: { dir: string; add?: string[] }) => {
+      let tReify = 0
+      return Effect.gen(function* () {
         yield* flock.acquire(`npm-install:${input.dir}`)
         const { Arborist } = yield* Effect.promise(() => import("@npmcli/arborist"))
         const add = input.add ?? []
@@ -92,7 +93,7 @@ const layer = Layer.effect(
           ignoreScripts: true,
         })
         yield* Effect.logDebug(`[TRACE] reify start dir=${input.dir} add=[${add.join(",")}]`)
-        const tReify = Date.now()
+        tReify = Date.now()
         return yield* Effect.tryPromise({
           try: () =>
             arborist.reify({
@@ -114,6 +115,7 @@ const layer = Layer.effect(
           attributes: input,
         }),
       )
+    }
 
     const add = Effect.fn("Npm.add")(function* (pkg: string) {
       const dir = directory(pkg)
