@@ -12,7 +12,13 @@
 - 第四课：Prompt 构造与系统提示词
 - 第五课：Multi-Agent 协作机制
 
-### 2. 代码导航
+### 2. 深入专题（编号课时）
+- `01-agent-core.md` — Agent 系统核心
+- `02-hook-mechanism.md` — Hook 机制
+- `03-ui-layer.md` — UI 接入层（CLI / TUI / HTTP Server）
+- `04-input-concurrency.md` — 执行中的新输入：会话并发与输入感知机制
+
+### 3. 代码导航
 **文件**: `code-navigation.md` (8KB)
 
 - 核心目录结构
@@ -20,7 +26,7 @@
 - 核心数据流
 - 关键代码片段索引
 
-### 3. 代码示例文档
+### 4. 代码示例文档
 **文件**: `code-examples.md` (12KB)
 
 - Agent 定义示例
