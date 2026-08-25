@@ -34,3 +34,5 @@ logs/
 tsconfig.tsbuildinfo
 /artifacts/
 third
+.opencode
+.global-opencode
