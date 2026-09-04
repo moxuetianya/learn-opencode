@@ -17,6 +17,8 @@
 - `02-hook-mechanism.md` — Hook 机制
 - `03-ui-layer.md` — UI 接入层（CLI / TUI / HTTP Server）
 - `04-input-concurrency.md` — 执行中的新输入：会话并发与输入感知机制
+- `05-tui-startup-and-config.md` — 启动链路：命令入口 → server → 配置/插件/provider 装配 → TUI 同步
+- `06-conversation-agent-loop.md` — 一次对话：消息构造 → Agent 循环 → thinking/tool-use 并行与串行 → 事件回流
 
 ### 3. 代码导航
 **文件**: `code-navigation.md` (8KB)
