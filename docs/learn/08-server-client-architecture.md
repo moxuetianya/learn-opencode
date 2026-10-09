@@ -142,13 +142,16 @@ $ cat ~/.local/state/opencode/service.json
  "pid":1057820,"password":"MNhZ87yVAB-..."}
 ```
 
-`service.json` 是**注册表**：daemon 启动时原子写入 `{id, version, url, pid}`；后续任何 `opencode` 命令（含 TUI）启动时读它、带 password 探活 `/health`：
+`service.json` 是**注册表**：daemon 启动时原子写入 `{id, version, url, pid, password}`；后续任何 `opencode` 命令（含 TUI）启动时读它、带 password 探活 `/api/info`：
 
 - 健康 + 版本一致 → **直接复用**，不起新 server；
-- 不健康/版本不符 → 停旧的，`spawn(serve --register)` 拉起新 daemon（detached），轮询直到健康；
+- 不健康/版本不符 → 停旧的，`spawn(serve --service)` 拉起新 daemon（detached），轮询直到健康；
 - 退出时 finalizer 删注册；`opencode service stop` 认证后才向 pid 发信号（防注册表过期误杀复用 pid 的进程）。
 
-本仓库 dev 分支的对应实现就是 `packages/cli/src/services/daemon.ts`（注册文件叫 `server.json`，密码单独存 `~/.local/state/opencode/password`，`0o600` 跨重启复用；`register()` 每 10s 自检注册归属，被抢占就 SIGTERM 自己，`daemon.ts:164-186`）。v2 CLI 的**每条命令**都被框架注入 `Daemon.Service`（`packages/cli/src/framework/runtime.ts:13-17`）；默认 TUI 命令 `daemon.transport() → runTui(transport)`（`commands/handlers/default.ts:9-11`）——**TUI 用的也是共享 daemon 的 URL**。
+> **当前实现更新**：注册文件为 `~/.local/state/opencode/service.json`（密码内嵌其中，`0600`），
+> 发现/拉起逻辑在 `packages/client/src/effect/service.ts`（`Service.ensure`）+
+> `packages/cli/src/services/server-connection.ts`；新 daemon 注册后每 5s 自检归属，被抢占即自杀。
+> 完整生命周期（假死升级、PTY 移交、重启恢复、多 contender 仲裁）见**第 10 课**。
 
 ```
 opencode TUI #1 ─┐

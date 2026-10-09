@@ -22,6 +22,15 @@
 - `07-config-loading.md` — 配置加载全景：opencode.jsonc 九层合并、tui.json/cli.json 客户端偏好、状态文件分工（v2）
 - `08-server-client-architecture.md` — Server/Client 架构：职责边界、tool-use 在 server 执行、daemon 多客户端共享、v2 会话执行链路
 - `09-storage-sqlite.md` — 数据存储：全局 SQLite（WAL）、事件溯源落库之旅、表结构、迁移与日常管理
+- `10-service-lifecycle.md` — 后台服务生命周期：daemon 死了怎么被调活——注册文件发现、客户端 ensure/contender 拉起、注册仲裁、停止升级与 PTY 移交、重启后 Session/后台任务恢复（v2）
+- `11-background-task-notify.md` — 后台任务主动唤醒：bash 转后台后的完成通知——Job 持久化、synthetic 消息、inbox 投递与 wake 语义、agent/用户两种唤醒策略（v2）
+- `12-v2-session-core-map.md` — V2 Session Core 知识地图：术语表（step/turn/delivery/claim/wake）、不变式清单、"主动发起"入口总表、compaction 触发、源码阅读路径
+
+> **版本漂移说明**：04/06/08/09 课写作时对应较早的 v2 dev 状态，部分符号已更名——
+> 准入 `SessionInput`（`session/input.ts`）→ `SessionInbox`（`session/inbox.ts`）、
+> 入口 `V2Session.prompt`（`session.ts`）→ `Session.prompt`、注册文件 `server.json` →
+> `service.json`、`serve --register` → `serve --service`。机制描述仍然成立；
+> 以 **10/11/12 课**（及 `packages/core/src/session/` 当前源码）为最新实现口径。
 
 ### 3. 代码导航
 **文件**: `code-navigation.md` (8KB)

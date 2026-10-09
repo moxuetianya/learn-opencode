@@ -102,6 +102,12 @@ v2 把"输入准入"与"模型执行"彻底分离。核心文件在 `packages/co
 
 ### 4.5.1 准入（admit）即返回
 
+> **当前实现更新**：准入/收件箱已从早期的 `SessionInput`（`session/input.ts`）演进为
+> `SessionInbox`（`packages/core/src/session/inbox.ts`）+ `session_inbox` 表，入口统一在
+> `Session.prompt` / `Session.synthetic`（`packages/core/src/session/session.ts`）。
+> 术语与本节一致（delivery steer/queue、幂等 admit、advisory wake）；
+> 投递边界的最新细节见第 4.5.3、第 11 课。
+
 `V2Session.prompt`（`packages/core/src/session.ts:360`）：
 
 ```
