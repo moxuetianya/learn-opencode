@@ -194,6 +194,56 @@ app.tsx                    # 主应用入口
 - 子代理进度跟踪
 - 音频提示
 
+### 3.3.5 终端面板与持久 PTY（`/terminal` 的"丢失"与恢复）
+
+**现象**：在 TUI 里重复执行 `/terminal`，之前打开的终端从画面上"消失"了，
+但里面跑的任务（如 dev server）仍在正常执行。
+
+**本质**：v2 TUI 的终端是**服务端持久 PTY**，不是 TUI 本地进程：
+
+- 每个终端 = server 端一个 persistent PTY（`client.api.experimental.persistentPty.create/list`），
+  TUI 只是 attach 上去做渲染；
+- 切换/隐藏终端面板只是改"当前选中显示哪一个"（`selectTerminal(sessionID, ptyID)`），
+  **PTY 进程不死**，任务继续跑；
+- PTY 列表和选中项都持久化：列表由 server 持有（TUI 重启/断连后
+  `server.connected` 时自动 refresh 恢复），选中项存在 TUI 本地存储
+  key `session-terminal-selection`。
+
+**关键：两个入口语义完全不同**（源码 + v2.0.24 release 二进制双重确认）：
+
+| 入口 | keybind | 行为 |
+|------|---------|------|
+| `/terminal`（slash，`session.terminal`） | 命令面板 | **无条件新建**一个 PTY 并切过去 |
+| 显示/隐藏终端面板（`terminal.toggle`） | `<leader>t` | 面板可见时隐藏；隐藏时显示并选中列表**最后一个**（`at(-1)`），列表为空才新建 |
+| 选择终端（`terminal.select`） | `<leader>down` | 弹出 composer 的 **Terminals 列表**：该 session 的全部持久 PTY |
+| 关闭终端面板（`terminal.close`） | `<leader>up` | 只关面板（deselect），**不杀 PTY** |
+
+所以"重复执行 `/terminal` 导致旧终端丢失"是设计使然：斜杠命令的语义就是
+"New terminal"，每次都新建并把选中切过去，旧终端只是不再被显示。
+
+**恢复旧终端**：
+
+1. 按 `<leader>down`（或命令面板 "Select terminal"）；
+2. composer 弹出 Terminals 列表，每行显示该终端的**当前前台进程名**
+   （`foregroundProcess ?? title`）——还在跑的任务会直接显示进程名，一眼可辨；
+3. `up/k`、`down/j` 移动（`composer.terminal.up/down`），**Enter** 选中
+   （`composer.terminal.select`），鼠标悬停 + 点击同样有效。
+
+**注意**：
+
+- toggle 永远跳到最新创建的那个，建了多个终端后想回旧的，一律走
+  `<leader>down` 列表挑选；
+- 想真正结束某个终端里的任务：切回那个终端 Ctrl+C / `exit`；删除会话或
+  显式调删除接口才会移除 PTY（对应 `persistent-pty.removed` 事件）。
+
+**核心文件**：
+
+| 文件 | 职责 |
+|------|------|
+| `packages/tui/src/context/session-terminals.tsx` | 终端列表/选中状态管理、`newTerminal()`、持久 PTY 事件刷新 |
+| `packages/tui/src/routes/session/composer/terminals-tab.tsx` | composer 的 Terminals 列表 UI（up/down/select 键层） |
+| `packages/tui/src/component/session-frame.tsx` | `terminal.toggle/select/close` 命令注册 |
+
 ---
 
 ## 3.4 HTTP API Server
