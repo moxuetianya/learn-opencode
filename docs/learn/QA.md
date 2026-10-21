@@ -654,6 +654,103 @@ TUI 插件卸载时应调用它（或把它放进插件自己的 cleanup），�
 
 ---
 
+## Q11. V2 插件能限制 TUI 的命令（如 `/model`、`/new`、`/fork`）吗？
+
+**不能完整做到。** 当前公开插件 API 没有“过滤命令面板 / 拦截斜杠命令执行”的钩子。
+
+v1 的 `restricted-commands.ts` 是在 TUI 命令层直接隐藏/拦截；v2 的命令系统换成
+keymap layer 之后，没有一一对应的公开扩展点。
+
+### 先分清两类命令
+
+| 命令 | 归属 | 例子 |
+|---|---|---|
+| TUI 本地命令 | 客户端 keymap | `/models`、`/agents`、`/variants`、`/connect`、`/new`、`/fork`、`/sessions`（`/resume`）、`/plugins`、`/mcps`、`/skills` |
+| Server 斜杠命令 | Core `Command.Service` | `/init`、`/review`、配置/插件注册的自定义命令 |
+
+你列出的 v1 命令里，大多数现在是 **TUI 本地命令**；`/init`、`/review` 是 server 命令。
+`/model`、`/org` 在当前 V2 源码里没有找到同名 slash 入口（`/models` 代替 `/model`）。
+
+### TUI 插件能做什么
+
+`@opencode/plugin/tui` 的 `Keymap` 公开接口：
+
+```ts
+layer(factory)        // 注册命令/按键层
+dispatch(id)          // 主动派发命令
+shortcuts(id)
+commands()            // 只读：当前可达命令
+pending()
+active()
+mode
+```
+
+它**可以**：
+
+- 注册自己的命令、slash 命令、按键绑定；
+- 读取当前可达命令列表；
+- 控制自己注册的命令是否 enabled；
+- 主动 dispatch 某个命令。
+
+它**不能**：
+
+- 从命令面板移除/隐藏内置命令；
+- 过滤 `commands()` 的返回结果；
+- 拦截某个内置命令的执行；
+- 阻止用户直接输入 `/new`、`/model` 等文本；
+- 覆盖内置命令的实现（同名注册不是受支持的“替换”语义）。
+
+内部 TUI 的 `keymap.intercept` 存在于 `tui/src/context/keymap.tsx`，
+但**没有暴露**在插件 `Context` 的 `Keymap` 接口里，所以插件也不能靠它拦键。
+
+命令面板构建自 `Keymap.useCommands()`（`component/command-palette.tsx`），
+斜杠补全同时合并 keymap 命令和 server 命令
+（`component/prompt/autocomplete.tsx`），两者都没有插件过滤点。
+
+### Server 插件能做什么
+
+`ctx.command.transform(editor => ...)` 只能 **`add`**：
+
+```ts
+// packages/core/src/command.ts
+type Editor = { add: (definition: Definition) => void }
+```
+
+- 不能 remove/hide；
+- 同名 `add` 会覆盖已有定义（当前 Map 行为），所以可以**替换** `/init`、`/review`
+  或自定义命令，但这不是公开的“删除”语义；
+- 命令注册表是 **Location 范围**，不是按 Session 隔离；
+- 可以在 `execute` 里检查 `input.sessionID`，对任务会话直接失败/不执行，
+  但命令仍然出现在列表里；
+- 它管不到 TUI 本地命令，因为这些命令根本不发到 server。
+
+### 因此，任务会话的确定性应该怎么做
+
+如果目标是防止用户改模型/换 agent/开新会话，推荐按可靠性排序：
+
+1. **不要给用户 TUI 命令面**：任务会话用 `opencode run` / HTTP API / 自定义无头客户端，
+   由宿主固定 agent、model、permission。这是最稳的。
+2. **自定义 TUI**：在 fork/内部构建里给命令面板和 slash 补全加过滤，
+   并在 keymap dispatch 前做 session 级策略检查。需要改 TUI，不是纯插件。
+3. **Server 侧策略网关**：在反向代理/自定义 server 层拒绝 `switchAgent`、
+   `switchModel`、创建会话、fork、provider connect 等状态变更接口。
+   能防 API 调用，但防不住 TUI 本地导航/面板。
+4. **纯插件方案只能做“软限制”**：注册自己的命令、提示、面板，
+   或覆盖 server 的 `/init`、`/review`；不能真正隐藏或阻止内置 TUI 命令。
+
+### 如果要在上游补这个能力
+
+需要新增一个明确的扩展点，例如：
+
+- TUI `Keymap` 增加 `filter`/`transform`，让插件能隐藏或禁用命令；
+- 或在命令 dispatch 前提供 `command.before` 策略 hook（能拿到 command id、sessionID、返回值）；
+- 或在 prompt 提交层提供 `slash.before` hook，能拒绝/改写命令；
+- 同时区分“可见性”和“执行授权”——只隐藏 UI 不能算强制限制。
+
+目前没有这些公开钩子，所以“v2 插件 API 尚未实现命令限制”这个判断是准确的。
+
+---
+
 ## 相关源码
 
 | 主题 | 文件 |
