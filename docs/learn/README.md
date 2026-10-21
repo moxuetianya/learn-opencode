@@ -12,7 +12,7 @@
 > 正文只在「迁移/历史」小注里提一句。
 >
 > **写法约定**：以**讲清原理和扩展点**为主，代码只作为佐证与上手示例。
-> 若你主要想开发插件/工具，先读 **02 → 01 → 06**，再直接看 `code-examples.md`。
+> 若你主要想开发插件/工具，先读 **06 → 05 → 02**，再直接看 `code-examples.md`。
 
 ---
 
@@ -21,35 +21,36 @@
 | 课 | 文件 | 主题 |
 |---|---|---|
 | 总览 | [`OpenCode-MultiAgent-Learning-Guide.md`](./OpenCode-MultiAgent-Learning-Guide.md) | 五条主线速览 + 学习路径 |
-| 01 | [`01-agent-core.md`](./01-agent-core.md) | Agent / Tool / Skill / System Prompt 的 V2 内核 |
-| 02 | [`02-hook-mechanism.md`](./02-hook-mechanism.md) | Plugin 与 Hook：扩展点、注册顺序、执行语义 |
-| 03 | [`03-ui-layer.md`](./03-ui-layer.md) | CLI / TUI / HTTP Server / Client 接入层 |
-| 04 | [`04-input-concurrency.md`](./04-input-concurrency.md) | 执行中的新输入：Inbox、steer/queue、协调器 |
-| 05 | [`05-tui-startup-and-config.md`](./05-tui-startup-and-config.md) | 一次启动：命令 → daemon/standalone → TUI 就绪 |
-| 06 | [`06-conversation-agent-loop.md`](./06-conversation-agent-loop.md) | 一次对话：提交 → 准入 → runner → 流式事件 |
-| 07 | [`07-config-loading.md`](./07-config-loading.md) | 配置全景：来源、发现顺序、`cli.json`、状态文件 |
-| 08 | [`08-server-client-architecture.md`](./08-server-client-architecture.md) | Server / Client 职责、工具执行位置、daemon 共享 |
-| 09 | [`09-storage-sqlite.md`](./09-storage-sqlite.md) | 全局 SQLite、事件溯源、表结构、备份 |
-| 10 | [`10-service-lifecycle.md`](./10-service-lifecycle.md) | 后台服务生命周期：发现、拉起、停止、重启恢复 |
-| 11 | [`11-background-task-notify.md`](./11-background-task-notify.md) | 后台任务完成通知与自动唤醒 |
-| 12 | [`12-v2-session-core-map.md`](./12-v2-session-core-map.md) | V2 Session Core 术语、不变式、入口总表 |
+| 01 | [`01-tui-startup-and-config.md`](./01-tui-startup-and-config.md) | 一次启动：命令 → daemon/standalone → TUI 就绪 |
+| 02 | [`02-conversation-agent-loop.md`](./02-conversation-agent-loop.md) | 一次对话：提交 → 准入 → runner → 流式事件 |
+| 03 | [`03-input-concurrency.md`](./03-input-concurrency.md) | 执行中的新输入：Inbox、steer/queue、协调器 |
+| 04 | [`04-v2-session-core-map.md`](./04-v2-session-core-map.md) | V2 Session Core 术语、不变式、入口总表 |
+| 05 | [`05-agent-core.md`](./05-agent-core.md) | Agent / Tool / Skill / System Prompt 的 V2 内核 |
+| 06 | [`06-hook-mechanism.md`](./06-hook-mechanism.md) | Plugin 与 Hook：扩展点、注册顺序、执行语义 |
+| 07 | [`07-ui-layer.md`](./07-ui-layer.md) | CLI / TUI / HTTP Server / Client 接入层 |
+| 08 | [`08-config-loading.md`](./08-config-loading.md) | 配置全景：来源、发现顺序、`cli.json`、状态文件 |
+| 09 | [`09-server-client-architecture.md`](./09-server-client-architecture.md) | Server / Client 职责、工具执行位置、daemon 共享 |
+| 10 | [`10-storage-sqlite.md`](./10-storage-sqlite.md) | 全局 SQLite、事件溯源、表结构、备份 |
+| 11 | [`11-service-lifecycle.md`](./11-service-lifecycle.md) | 后台服务生命周期：发现、拉起、停止、重启恢复 |
+| 12 | [`12-background-task-notify.md`](./12-background-task-notify.md) | 后台任务完成通知与自动唤醒 |
 | 附 | [`code-navigation.md`](./code-navigation.md) | V2 代码地图 |
 | 附 | [`code-examples.md`](./code-examples.md) | V2 API / 插件 / 配置示例 |
 
-建议顺序：**总览 → 05 → 06 → 04 → 12 → 其余专题**。
-05/06 先把"一次启动 + 一次对话"跑通，04/12 再收口并发与不变式。
+阅读顺序就是编号顺序：**01 → 02 → 03 → 04 → 05 …**。
+前四课先把"一次启动 + 一次对话 + 并发边界 + 核心不变式"跑通；
+05 之后按兴趣深入 Agent、插件、UI、配置、存储与服务生命周期。
 
 ### 想开发插件 / Tool？走这条
 
 ```
-02（Transform / Hook / 加载顺序）
-  → 01（Agent / Tool / Skill 的数据结构）
-  → 06（一次请求里 hook 的触发位置）
+06（Transform / Hook / 加载顺序）
+  → 05（Agent / Tool / Skill 的数据结构）
+  → 02（一次请求里 hook 的触发位置）
   → code-examples.md（最小可运行骨架）
-  → 按需回查 05（启动） / 07（配置） / 09（持久化）
+  → 按需回查 01（启动） / 08（配置） / 10（持久化）
 ```
 
-不要在没读 02 的情况下直接抄旧版 `Hooks` 接口——V1 的 hook 名称已经全部改名。
+不要在没读 06 的情况下直接抄旧版 `Hooks` 接口——V1 的 hook 名称已经全部改名。
 
 ---
 
@@ -91,7 +92,7 @@ bun run dev -- serve
 ```
 
 `dev:live` 会自动读取 `opencode service status` / `opencode service get password`，
-让开发中的 TUI 连上正在运行的 daemon。后台服务生命周期见第 10 课。
+让开发中的 TUI 连上正在运行的 daemon。后台服务生命周期见第 11 课。
 
 ---
 

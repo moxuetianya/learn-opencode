@@ -1,4 +1,4 @@
-# 04. 执行中的新输入：Inbox、steer/queue 与协调器
+# 3. 执行中的新输入：Inbox、steer/queue 与协调器
 
 > 本课回答：模型还在流式输出时，用户又提交了一条输入，会发生什么？
 > 输入怎么被"高效"读到？为什么不会丢、不会叠循环、也不会打断正在流的调用？
@@ -8,7 +8,7 @@
 
 ---
 
-## 4.1 结论先给
+## 3.1 结论先给
 
 - opencode **业务代码里没有 epoll/select/poll 调用**。键盘感知是
   `process.stdin` 的 `"data"` 事件；epoll 是 Bun 运行时在 Linux 下的 I/O 多路复用实现。
@@ -20,7 +20,7 @@
 
 ---
 
-## 4.2 进程与线程
+## 3.2 进程与线程
 
 ```
 ┌─ 客户端进程 ───────────────────────────┐   ┌─ Server 进程 ──────────────────────┐
@@ -30,13 +30,13 @@
 └─────────────────────────────────────────┘   └────────────────────────────────────┘
 ```
 
-- 本地默认连**共享 daemon**；`--standalone` 或 `--server` 则换 endpoint（第 10 课）。
+- 本地默认连**共享 daemon**；`--standalone` 或 `--server` 则换 endpoint（第 11 课）。
 - 模型推理与工具执行都在 server 进程；客户端只消费事件。
 - 因此即使 server 很忙，TUI 的键盘/渲染仍在自己的进程里。
 
 ---
 
-## 4.3 输入感知：事件驱动，不是轮询
+## 3.3 输入感知：事件驱动，不是轮询
 
 ```
 键盘按键
@@ -73,7 +73,7 @@ const disabled = createMemo(() =>
 
 ---
 
-## 4.4 准入：`Session.prompt` 只落库
+## 3.4 准入：`Session.prompt` 只落库
 
 `packages/core/src/session/session.ts`：
 
@@ -101,7 +101,7 @@ skill 内容、Plan 模式提醒等。`resume: false` = 只准入、不响铃。
 
 ---
 
-## 4.5 协调器：一个 Session 一个 busy period
+## 3.5 协调器：一个 Session 一个 busy period
 
 `session/run-coordinator.ts`：
 
@@ -131,11 +131,11 @@ loop:
 - 不同 Session 的 execution 并行；
 - 同一 Session 的多次 wake **coalesce**；
 - 若 wake 发生在 drain 已经决定结束之后，`settle` 会启动 successor execution；
-- `started` / `settled` 钩子负责写 durable claim 与终态事件（第 10 课）。
+- `started` / `settled` 钩子负责写 durable claim 与终态事件（第 11 课）。
 
 ---
 
-## 4.6 Runner：在安全边界晋升输入
+## 3.6 Runner：在安全边界晋升输入
 
 `session/runner/llm.ts` 的 `drain`：
 
@@ -178,7 +178,7 @@ advanceToStep():
 
 ---
 
-## 4.7 中断
+## 3.7 中断
 
 ```
 TUI Esc×2
@@ -202,7 +202,7 @@ TUI Esc×2
 
 ---
 
-## 4.8 完整时序：运行中追加输入
+## 3.8 完整时序：运行中追加输入
 
 ```
 用户按回车
@@ -234,7 +234,7 @@ TUI Esc×2
 
 ---
 
-## 4.9 常见误区
+## 3.9 常见误区
 
 | 误区 | 事实 |
 |---|---|
@@ -247,7 +247,7 @@ TUI Esc×2
 
 ---
 
-## 4.10 小结
+## 3.10 小结
 
 1. **输入不阻塞**：客户端乐观提交 + SSE 增量渲染。
 2. **准入与执行分离**：`session_inbox` 是唯一入口，wake 是 advisory。

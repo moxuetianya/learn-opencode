@@ -1,4 +1,4 @@
-# 11. 后台任务主动唤醒：bash 转后台后，对话怎么"自动续上"
+# 12. 后台任务主动唤醒：bash 转后台后，对话怎么"自动续上"
 
 > 本课回答：**opencode V2 调用的 bash 后台程序完成后，能主动发起对话吗？**
 > 结论：能——**agent 自己发起的后台任务**（`shell` 工具 `background: true`）完成时，会把一条
@@ -6,10 +6,10 @@
 > 安全边界注入。模型因此敢承诺 *"DO NOT poll, you will be resumed automatically"*。
 > 对照：**用户自己提交的后台命令**只入队通知、不唤醒。
 >
-> 承接第 4 课（steer/queue 输入并发）与第 8 课（v2 执行链路）；本课以当前实现
+> 承接第 3 课（steer/queue 输入并发）与第 9 课（v2 执行链路）；本课以当前实现
 > （`SessionInbox` + `Job` + `SessionExecution`）为准。
 
-## 11.1 两种后台 shell，两种唤醒策略
+## 12.1 两种后台 shell，两种唤醒策略
 
 | 发起者 | 入口 | 完成通知 | 是否唤醒模型 |
 |---|---|---|---|
@@ -20,7 +20,7 @@
 设计动机：agent 发起后台任务是在"等结果继续干活"，完成即新工作到达，应该自动续上；
 用户自己跑的命令完成了，不该让模型自己转起来。
 
-## 11.2 建立：`shell` 工具的 background 模式
+## 12.2 建立：`shell` 工具的 background 模式
 
 `packages/core/src/tool/plugin/shell.ts`：
 
@@ -46,7 +46,7 @@
 
    前台命令被打断/转后台（`jobs.block` 返回 `backgrounded`）走同一条路（shell.ts）。
 
-## 11.3 完成时：`notifyWhenDone` → `sessions.synthetic`
+## 12.3 完成时：`notifyWhenDone` → `sessions.synthetic`
 
 观察者 fiber（shell.ts）：
 
@@ -81,7 +81,7 @@ if (input.resume !== false && !session.revert)
   execution.wake(sessionID)              // ② 主动唤醒（本课的核心）
 ```
 
-## 11.4 wake 语义：空闲起新执行，运行中合并
+## 12.4 wake 语义：空闲起新执行，运行中合并
 
 `SessionRunCoordinator.wake`（`packages/core/src/session/run-coordinator.ts`）：
 
@@ -89,12 +89,12 @@ if (input.resume !== false && !session.revert)
 wake(sessionID):
   ├─ 该 Session 有活跃执行 → pendingWake = 合并（scope 取更宽的 "input"）
   │   （当前 drain 结束时 settle() 读到 pendingWake → 起 successor drain）
-  └─ 空闲 → start() 新 execution（durable claim 同事务写入，见第 10 课 §10.7）
+  └─ 空闲 → start() 新 execution（durable claim 同事务写入，见第 11 课 §11.7）
 ```
 
 多次 wake **coalesce 成一次**：同一时刻无论多少后台任务完成，会话至多被"门铃"响一次。
 
-## 11.5 投递：synthetic 消息如何进入模型上下文
+## 12.5 投递：synthetic 消息如何进入模型上下文
 
 新执行（或 successor drain）在 `SessionRunner.drain` 里推进（`runner/llm.ts`）：
 
@@ -119,9 +119,9 @@ advanceToStep 循环:
   （`runner/llm.ts`，scope 收窄为 `"steer"`）通知被提升，同一轮执行的下一次
   `llm.stream` 就能看到它——不打断正在流的调用。
 
-投递语义与第 4 课的 steer/queue 完全一致；synthetic 完成通知走的就是 steer 通道。
+投递语义与第 3 课的 steer/queue 完全一致；synthetic 完成通知走的就是 steer 通道。
 
-## 11.6 可靠性设计
+## 12.6 可靠性设计
 
 | 关注点 | 机制 | 位置 |
 |---|---|---|
@@ -131,7 +131,7 @@ advanceToStep 循环:
 | 输出不再可得 | shell 输出文件被清理时回退 "Shell command output is no longer available." | `shell/result.ts` |
 | 通知会话已删 | `Session.NotFoundError` → 静默吞掉 | `session.ts` |
 
-## 11.7 完整时序：agent 发起后台构建
+## 12.7 完整时序：agent 发起后台构建
 
 ```
 模型: shell({ command: "bun run build", background: true })
@@ -152,7 +152,7 @@ advanceToStep 循环:
   └─ TUI: SSE 事件流实时渲染新一轮输出
 ```
 
-## 11.8 相关机制：subagent 后台任务
+## 12.8 相关机制：subagent 后台任务
 
 `packages/core/src/tool/plugin/subagent.ts` 与 shell 同构：
 
@@ -161,7 +161,7 @@ advanceToStep 循环:
 - 子会话完成 → `SubagentCompletion.deliver` 向**父会话**注入 synthetic 通知（含子会话结果摘要）
 - 重启恢复时（`restart.ts`）子会话还能续则续跑，否则向父会话补发结果通知
 
-## 11.9 对插件/工具开发的启示
+## 12.9 对插件/工具开发的启示
 
 - **工具不要在 step 里无限等待**：长任务应尽快返回，把"完成"作为新输入注入。
   当前后台 Job 是 Core 内部能力，外部插件 Context 没有直接暴露；
@@ -172,7 +172,7 @@ advanceToStep 循环:
   纯提醒/状态同步用 `resume: false`，避免空闲会话被无故拉起。
 - **幂等键很重要**：通知用稳定 ID，重试/重启不会产生重复消息。
 
-## 11.10 小结
+## 12.10 小结
 
 1. **完成通知 = synthetic steer 消息 + wake**，不是回调、不是轮询——走和用户输入同一条
    持久化收件箱链路。

@@ -1,4 +1,4 @@
-# 09. 数据存储：全局 SQLite、事件溯源与日常管理
+# 10. 数据存储：全局 SQLite、事件溯源与日常管理
 
 > 本课回答：V2 的数据到底存在哪？为什么用事件溯源？有哪些表？
 > 一条输入是怎么落库、怎么变成可见消息的？怎么安全地查看和备份？
@@ -8,7 +8,7 @@
 
 ---
 
-## 9.0 一句话模型
+## 10.0 一句话模型
 
 **一个全局 SQLite 数据库服务所有项目和会话。**
 
@@ -31,7 +31,7 @@
 
 ---
 
-## 9.1 打开即调优
+## 10.1 打开即调优
 
 `packages/core/src/database/database.ts`：
 
@@ -53,7 +53,7 @@ PRAGMA wal_checkpoint(PASSIVE)
 
 ---
 
-## 9.2 表结构
+## 10.2 表结构
 
 Schema 定义在 `packages/core/src/**/sql.ts`，Drizzle 类型由 `schema.gen.ts` 生成。
 
@@ -99,9 +99,9 @@ Schema 定义在 `packages/core/src/**/sql.ts`，Drizzle 类型由 `schema.gen.t
 
 ---
 
-## 9.3 为什么用事件溯源
+## 10.3 为什么用事件溯源
 
-### 9.3.1 写入模型
+### 10.3.1 写入模型
 
 `Bus.publish`（`core/src/bus.ts`）对一个 durable 事件做：
 
@@ -123,7 +123,7 @@ Schema 定义在 `packages/core/src/**/sql.ts`，Drizzle 类型由 `schema.gen.t
 - **可重建**：投影表理论上都能从 `event` 重放；
 - **可重连**：客户端带 `after` 序号就能补齐 durable 事件。
 
-### 9.3.2 一条 prompt 的落库之旅
+### 10.3.2 一条 prompt 的落库之旅
 
 ```
 ① Session.prompt
@@ -147,7 +147,7 @@ Schema 定义在 `packages/core/src/**/sql.ts`，Drizzle 类型由 `schema.gen.t
        → 更新 session 的 idle/outcome，释放 claim
 ```
 
-### 9.3.3 durable 与 ephemeral
+### 10.3.3 durable 与 ephemeral
 
 | 类型 | 例子 | 是否落库 | 用途 |
 |---|---|---|---|
@@ -159,7 +159,7 @@ Schema 定义在 `packages/core/src/**/sql.ts`，Drizzle 类型由 `schema.gen.t
 
 ---
 
-## 9.4 指令与压缩的存储
+## 10.4 指令与压缩的存储
 
 ### 指令
 
@@ -181,7 +181,7 @@ Schema 定义在 `packages/core/src/**/sql.ts`，Drizzle 类型由 `schema.gen.t
 
 ---
 
-## 9.5 迁移
+## 10.5 迁移
 
 - 迁移是 TypeScript：`packages/core/src/database/migration/*.ts`，
   在 `migration.gen.ts` 注册；每个导出 `{ id, up(tx) }`；
@@ -201,7 +201,7 @@ Schema 定义在 `packages/core/src/**/sql.ts`，Drizzle 类型由 `schema.gen.t
 
 ---
 
-## 9.6 磁盘上的其他数据
+## 10.6 磁盘上的其他数据
 
 | 路径 | 内容 |
 |---|---|
@@ -216,7 +216,7 @@ Schema 定义在 `packages/core/src/**/sql.ts`，Drizzle 类型由 `schema.gen.t
 
 ---
 
-## 9.7 查看、统计、备份
+## 10.7 查看、统计、备份
 
 ### 查看
 
@@ -261,7 +261,7 @@ sqlite3 opencode.db "PRAGMA wal_checkpoint(TRUNCATE)"
 
 ---
 
-## 9.8 插件开发者需要知道什么
+## 10.8 插件开发者需要知道什么
 
 | 需求 | 做法 |
 |---|---|
@@ -276,7 +276,7 @@ sqlite3 opencode.db "PRAGMA wal_checkpoint(TRUNCATE)"
 
 ---
 
-## 9.9 小结
+## 10.9 小结
 
 1. **一个全局 SQLite**：按 channel 分文件；WAL + busy_timeout 支持多进程。
 2. **事件是真相，投影是读模型**：同事务写入，可重放。

@@ -1,7 +1,7 @@
 # 附录 B：插件与工具开发示例
 
 > 这是**上手用的最小示例集**，不是 API 全集。
-> 原则：先看第 02 课理解 Transform/Hook，再从这里抄骨架。
+> 原则：先看第 06 课理解 Transform/Hook，再从这里抄骨架。
 >
 > 所有示例针对 V2（opencode 2.0.24）。旧版 `Hooks` 接口的示例不要再用。
 
@@ -371,7 +371,7 @@ maintainability issues, and report findings with file paths. Do not edit files.
 ```ts
 import { OpenCode } from "@opencode/client/promise"
 
-// endpoint 的获取方式见第 10 课；这里假设已有 url + password
+// endpoint 的获取方式见第 11 课；这里假设已有 url + password
 const client = OpenCode.make({
   baseUrl: "http://127.0.0.1:49374",
   headers: {
@@ -455,9 +455,9 @@ for await (const event of client.event.subscribe()) {
 
 ## B.14 参考顺序
 
-1. 第 02 课：Transform / Hook 的区别与顺序。
-2. 第 01 课：Tool/Skill/Agent 的数据结构。
-3. 第 06 课：`session.context` 在请求组装的哪一步。
+1. 第 06 课：Transform / Hook 的区别与顺序。
+2. 第 05 课：Tool/Skill/Agent 的数据结构。
+3. 第 02 课：`session.context` 在请求组装的哪一步。
 4. 本文件：抄骨架 → 跑起来 → 看日志。
 5. `code-navigation.md`：需要深入时再按目录查。
 

@@ -1,4 +1,4 @@
-# 07. 配置加载全景：来源、优先级与三类数据
+# 8. 配置加载全景：来源、优先级与三类数据
 
 > 本课回答：V2 的配置到底分几种？`opencode.jsonc` 从哪里读、谁覆盖谁？
 > `cli.json` 是什么？`model.json` / `service.json` 算配置吗？
@@ -9,7 +9,7 @@
 
 ---
 
-## 7.0 先分清三个世界
+## 8.0 先分清三个世界
 
 | 类别 | 文件 | 加载方 | 影响 |
 |---|---|---|---|
@@ -22,7 +22,7 @@
 
 ---
 
-## 7.1 Server 配置：加载时机
+## 8.1 Server 配置：加载时机
 
 `Config.Service` 是 **Location 范围**服务，在 `Instance.layer(ref)` 启动时构建
 （`core/src/instance.ts`）。也就是说：
@@ -36,7 +36,7 @@
 
 ---
 
-## 7.2 来源与优先级
+## 8.2 来源与优先级
 
 `ConfigDiscovery.discover()` + `Config.load()` 的合并顺序（**后者覆盖前者**）：
 
@@ -76,7 +76,7 @@
 - `--server` / `--standalone` 只影响连接哪个 server，不改变 server 自己的配置来源；
 - 没有 `opencode.jsonc.local` 这种约定；个人覆盖请用 `OPENCODE_CONFIG` 指向私有文件。
 
-### 7.2.1 “后覆盖前”到底怎么合并
+### 8.2.1 “后覆盖前”到底怎么合并
 
 V2 **没有统一 deep merge**。`Config.entries()` 返回一个有序的 `Entry[]`，
 每个域所有者决定自己的合并方式：
@@ -91,7 +91,7 @@ V2 **没有统一 deep merge**。`Config.entries()` 返回一个有序的 `Entry
 
 这比"一个巨大的递归 merge"更好预测，也避免数组/对象语义混乱。
 
-### 7.2.2 配置目录里的 markdown
+### 8.2.2 配置目录里的 markdown
 
 `opencode.json(c)` 不是唯一来源。每个配置目录（包括 `.opencode`）还会被发现：
 
@@ -105,7 +105,7 @@ V2 **没有统一 deep merge**。`Config.entries()` 返回一个有序的 `Entry
 
 所以插件开发者可以把"配置 + 指令 + 工具"打包成目录结构，而不是只依赖 JSON。
 
-### 7.2.3 AGENTS.md
+### 8.2.3 AGENTS.md
 
 `AGENTS.md` **不是** `opencode.jsonc` 的一部分，而是 `InstructionDiscovery` 的来源：
 
@@ -119,7 +119,7 @@ V2 **没有统一 deep merge**。`Config.entries()` 返回一个有序的 `Entry
 
 ---
 
-## 7.3 V2 配置 schema 速查
+## 8.3 V2 配置 schema 速查
 
 定义在 `packages/schema/src/config.ts` 的 `Config.Info`：
 
@@ -145,7 +145,7 @@ V2 **没有统一 deep merge**。`Config.entries()` 返回一个有序的 `Entry
 | `websearch` | 搜索 provider |
 | `experimental` | 实验开关与组织策略 |
 
-### 7.3.1 权限规则
+### 8.3.1 权限规则
 
 ```jsonc
 {
@@ -162,7 +162,7 @@ V2 **没有统一 deep merge**。`Config.entries()` 返回一个有序的 `Entry
 - 配置里的全局 permissions 会进入每个 agent 的规则集；最终叠加顺序是
   agent（含配置）→ 会话 permissions → 已保存的 always 授权。
 
-### 7.3.2 插件声明
+### 8.3.2 插件声明
 
 ```jsonc
 {
@@ -174,10 +174,10 @@ V2 **没有统一 deep merge**。`Config.entries()` 返回一个有序的 `Entry
 }
 ```
 
-加载与排序见第 02 课。`options` 会原样传给插件 context。
+加载与排序见第 06 课。`options` 会原样传给插件 context。
 旧配置里的 `[target, options]` 元组会被归一化成对象形式，新配置请直接写对象。
 
-### 7.3.3 旧配置键
+### 8.3.3 旧配置键
 
 `packages/core/src/config/normalize.ts` 会把旧键归一化成 V2：
 
@@ -192,7 +192,7 @@ V2 **没有统一 deep merge**。`Config.entries()` 返回一个有序的 `Entry
 
 ---
 
-## 7.4 解析管线
+## 8.4 解析管线
 
 ```
 磁盘文件
@@ -209,7 +209,7 @@ V2 **没有统一 deep merge**。`Config.entries()` 返回一个有序的 `Entry
 
 ---
 
-## 7.5 `cli.json`：客户端偏好
+## 8.5 `cli.json`：客户端偏好
 
 `packages/cli/src/config/config.ts`：
 
@@ -239,7 +239,7 @@ Schema 是 `@opencode/tui/config` 的 `Info`，常见内容：
 
 ---
 
-## 7.6 状态文件
+## 8.6 状态文件
 
 | 文件 | 位置 | 谁写 | 用途 |
 |---|---|---|---|
@@ -251,14 +251,14 @@ Schema 是 `@opencode/tui/config` 的 `Info`，常见内容：
 | `frecency.jsonl` | 同上 | TUI 文件提及 | `@` 补全排序 |
 | TUI storage `<channel>/tui/*.json` | 同上 | TUI 插件/界面状态 | 会话选择、终端选择等 |
 | `auth` / credential | SQLite / credential 服务 | 登录流程 | API key / OAuth |
-| `opencode.db` | `$XDG_DATA_HOME/opencode/` | server | 会话、事件、收件箱（第 09 课） |
+| `opencode.db` | `$XDG_DATA_HOME/opencode/` | server | 会话、事件、收件箱（第 10 课） |
 
 这些都不是 `Config.Service` 的输入。插件若需要持久化自己的状态，应使用
 `ctx.storage`（按插件 ID 隔离的 KV），而不是写这些文件。
 
 ---
 
-## 7.7 热更新与诊断
+## 8.7 热更新与诊断
 
 ### 热更新
 
@@ -284,7 +284,7 @@ Schema 是 `@opencode/tui/config` 的 `Info`，常见内容：
 
 ---
 
-## 7.8 插件开发者应该关心什么
+## 8.8 插件开发者应该关心什么
 
 | 需求 | 推荐做法 |
 |---|---|
@@ -297,7 +297,7 @@ Schema 是 `@opencode/tui/config` 的 `Info`，常见内容：
 
 ---
 
-## 7.9 小结
+## 8.9 小结
 
 1. **三类数据分开**：server 配置、客户端偏好、运行状态。
 2. **配置按 Location 懒加载**，不是进程启动时一次性读完。

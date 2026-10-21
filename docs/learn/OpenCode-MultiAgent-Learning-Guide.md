@@ -96,7 +96,7 @@ SessionRunner.drain            packages/core/src/session/runner/llm.ts
 | **Step** | 一次逻辑 LLM 调用 | `session/runner/step.ts` |
 
 `steer`（默认）在下一个安全 step 边界插队；`queue` 等到会话将要空闲时一次晋升一条。
-真正打断流只能 `Session.interrupt`。细节见第 04 课。
+真正打断流只能 `Session.interrupt`。细节见第 03 课。
 
 ---
 
@@ -143,7 +143,7 @@ interface Snapshot {
    `ctx.provider.transform` / `ctx.model.transform` 等，按注册顺序重放。
 
 加载顺序：内置 `pre` → SDK/实例插件 → 内置 `post` → 配置声明的外部插件
-（顺序与覆盖规则见第 02 课）。
+（顺序与覆盖规则见第 06 课）。
 
 ---
 
@@ -155,7 +155,7 @@ interface Snapshot {
 - **读模型**：`session_message`（可见消息）、`session_inbox`（未消费工作）
 - 发布一个 durable 事件时，**投影与事件行在同一事务**提交，然后才 PubSub 扇出。
 
-因此：客户端断线可重放、进程崩溃可恢复、投影可重建。细节见第 09 课。
+因此：客户端断线可重放、进程崩溃可恢复、投影可重建。细节见第 10 课。
 
 ### 4.2 每次请求重新组装上下文
 
@@ -207,13 +207,13 @@ checkpoint 持久化；provider 细节封装在 `@opencode/ai` 的 `LLMClient.co
 ### 5.2 后台 shell 同一套机制
 
 `shell` 工具 `background: true` → `Job.start` → `jobs.background` → 完成时
-`Session.synthetic`（默认 steer）+ `execution.wake`。细节见第 11 课。
+`Session.synthetic`（默认 steer）+ `execution.wake`。细节见第 12 课。
 
 ### 5.3 重启后继续
 
 执行开始时写入 write-ahead claim（`session.time_suspended`），终态释放；
 shutdown/崩溃保留 claim。托管 server 启动时 `SessionRestart.resumeSuspendedSessions`
-扫描 claim、注入 "Continuing after restart"、带预算地续跑。细节见第 10 课。
+扫描 claim、注入 "Continuing after restart"、带预算地续跑。细节见第 11 课。
 
 ---
 
@@ -221,14 +221,14 @@ shutdown/崩溃保留 claim。托管 server 启动时 `SessionRestart.resumeSusp
 
 | 天数 | 内容 | 对应课程 |
 |---|---|---|
-| 第 1 天 | 分层、启动、第一次对话 | 05、06 |
-| 第 2 天 | 并发与收件箱、Session Core 不变式 | 04、12 |
-| 第 3 天 | Agent / Tool / Skill / System Prompt | 01 |
-| 第 4 天 | Plugin 与 Hook | 02 |
-| 第 5 天 | 配置、存储、服务生命周期 | 07、09、10 |
-| 第 6 天 | Server/Client、后台任务 | 03、08、11 |
+| 第 1 天 | 启动链路 + 第一次对话 | 01、02 |
+| 第 2 天 | 并发与收件箱、Session Core 不变式 | 03、04 |
+| 第 3 天 | Agent / Tool / Skill / System Prompt | 05 |
+| 第 4 天 | Plugin 与 Hook | 06 |
+| 第 5 天 | 配置、存储、服务生命周期 | 08、10、11 |
+| 第 6 天 | UI、Server/Client、后台任务 | 07、09、12 |
 
-> **如果你的目标是开发插件/工具**：先读 02（扩展模型）→ 01（数据结构）→ 06（hook 时机），
+> **如果你的目标是开发插件/工具**：先读 06（扩展模型）→ 05（数据结构）→ 02（hook 时机），
 > 然后直接用 `code-examples.md` 里的骨架。其余课程按需回查即可。
 
 读源码的推荐顺序：

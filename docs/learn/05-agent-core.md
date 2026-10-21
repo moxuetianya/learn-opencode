@@ -1,14 +1,14 @@
-# 01. Agent 内核：Agent、Tool、Skill、System Prompt 与 LLM 调用
+# 5. Agent 内核：Agent、Tool、Skill、System Prompt 与 LLM 调用
 
 > 本课回答：V2 的"Agent 内核"由哪些服务组成？一次 step 里 Agent 配置、工具快照、
 > Skill 指令、System Prompt 和 LLM 请求是怎么拼起来的？
 >
-> 会话如何被准入、调度、压缩，见第 04/06/12 课；本课聚焦"一次模型调用前后"的组件。
+> 会话如何被准入、调度、压缩，见第 02/03/04 课；本课聚焦"一次模型调用前后"的组件。
 > V1 的 `SessionPrompt.runLoop` / `processor` / `task` 工具已不在源码树，不再讨论。
 
 ---
 
-## 1.1 组件总览
+## 5.1 组件总览
 
 ```
                        ┌────────────────────────────┐
@@ -65,9 +65,9 @@
 
 ---
 
-## 1.2 Agent
+## 5.2 Agent
 
-### 1.2.1 数据结构
+### 5.2.1 数据结构
 
 `@opencode/schema/agent` 的 `Agent.Info`：
 
@@ -85,7 +85,7 @@
 默认权限由 `Agent.Info.default(id)` 给出：全允许，但读取 `*.env` / `*.env.*` 需要询问，
 `*.env.example` 允许。
 
-### 1.2.2 注册与选择
+### 5.2.2 注册与选择
 
 `Agent.Service`（`packages/core/src/agent.ts`）是 Location 范围的 State：
 
@@ -109,7 +109,7 @@
 `agent/agents/**/*.md` 与 `mode/modes/*.md` 会被扫描，front-matter 是配置，正文是 `system`；
 同名 agent 覆盖内置字段，`disabled: true` 删除。
 
-### 1.2.3 Agent 参与请求的两处
+### 5.2.3 Agent 参与请求的两处
 
 1. `SessionContext.select()`：选择 agent 与它的权限，用于工具快照和 skill 过滤；
 2. `SessionModelRequest.baseTranscript()`：`agent.system` 存在时替换默认 system prompt，
@@ -121,9 +121,9 @@ Agent 的 `model` 会参与子代理/标题等辅助选择；primary 请求实�
 
 ---
 
-## 1.3 Tool
+## 5.3 Tool
 
-### 1.3.1 注册表模型
+### 5.3.1 注册表模型
 
 一个工具就是一条 `Tool.Info`：
 
@@ -152,7 +152,7 @@ interface Info {
 - **权限可见性 ≠ 执行授权**：快照只过滤"模型看不看得到"；真正执行时工具叶子仍会
   `Permission.assert`。
 
-### 1.3.2 内置工具来源
+### 5.3.2 内置工具来源
 
 `packages/core/src/plugin/internal.ts` 的 `pre` 数组按顺序注册：
 
@@ -162,9 +162,9 @@ read / shell / skill / subagent / webfetch / websearch / write
 ```
 
 `shell` 是子进程执行入口；`read` 通过 `ReadToolFileSystem` 适配本地/远端；
-`mcp-resource` 暴露 MCP resources 工具；`subagent` 见第 11 课。
+`mcp-resource` 暴露 MCP resources 工具；`subagent` 见第 12 课。
 
-### 1.3.3 执行链
+### 5.3.3 执行链
 
 ```
 SessionStep.attempt
@@ -191,9 +191,9 @@ SessionStep.attempt
 
 ---
 
-## 1.4 Skill
+## 5.4 Skill
 
-### 1.4.1 发现与注册
+### 5.4.1 发现与注册
 
 `config/plugin/skill.ts` 汇总来源：
 
@@ -214,7 +214,7 @@ skills/<name>.md
 `skill-file.ts` 解析 front-matter（`name`、`description`、`disable-model-invocation`、
 `metadata.opencode/autoinvoke`），正文作为 skill content。
 
-### 1.4.2 注入与加载
+### 5.4.2 注入与加载
 
 - **注入**：`skill/instructions.ts` 只把 `id/name/description` 渲染成
   `<available_skills>`；`autoinvoke: false` 或无 description 的 skill 不出现。
@@ -231,9 +231,9 @@ Skill 列表变化时，指令来源会生成增量文本（新增/移除/描述
 
 ---
 
-## 1.5 System Prompt 与 Instructions
+## 5.5 System Prompt 与 Instructions
 
-### 1.5.1 Instructions 是"有序来源"，不是一个大字符串
+### 5.5.1 Instructions 是"有序来源"，不是一个大字符串
 
 `Instructions`（`packages/core/src/instructions/index.ts`）：
 
@@ -259,7 +259,7 @@ CodeModeInstructions
 
 这样可以最大化 provider 的 prompt cache 命中率。
 
-### 1.5.2 System prompt 的两段
+### 5.5.2 System prompt 的两段
 
 `SessionModelRequest.baseTranscript()`：
 
@@ -283,9 +283,9 @@ system = [
 
 ---
 
-## 1.6 模型与 LLM 调用
+## 5.6 模型与 LLM 调用
 
-### 1.6.1 解析链
+### 5.6.1 解析链
 
 ```
 Session.model (Model.Ref)
@@ -303,7 +303,7 @@ Session.model (Model.Ref)
 `Resolved.ref` 是**持久化与显示使用的 catalog 身份**；`Resolved.model.id` 是
 provider API 的模型 id，两者可能不同（如别名/路由）。
 
-### 1.6.2 请求
+### 5.6.2 请求
 
 `LLM.request({ model, system, messages, tools, toolChoice, generation, providerOptions, http })`
 得到规范化 `LLMRequest`，再交给：
@@ -315,7 +315,7 @@ llm.stream(request, options): Stream<LLMEvent, AIError>
 `StreamOptions` 可带 `http` 中间件和 `webSocket` 绑定。会话 runner 只在
 `model.transport === "websocket"` 时使用状态化 WebSocket。
 
-### 1.6.3 LLMEvent
+### 5.6.3 LLMEvent
 
 下游只认识统一事件，不关心底层是 AI SDK、原生协议还是 WebSocket：
 
@@ -333,7 +333,7 @@ llm.stream(request, options): Stream<LLMEvent, AIError>
 例如 `session.text.started/delta/ended`、`session.tool.called/success/failed`、
 `session.step.started/ended/failed`。这是 TUI 和 CLI 看到的一切。
 
-### 1.6.4 重试与失败
+### 5.6.4 重试与失败
 
 `runner/retry.ts`：
 
@@ -353,7 +353,7 @@ llm.stream(request, options): Stream<LLMEvent, AIError>
 
 ---
 
-## 1.7 ReAct 在 V2 里是什么样
+## 5.7 ReAct 在 V2 里是什么样
 
 V2 没有单独的 `runLoop` 函数，ReAct 体现在 `SessionRunner.drain`：
 
@@ -378,7 +378,7 @@ while (true) {
 
 ---
 
-## 1.8 开发 Tool 时必须理解的约束
+## 5.8 开发 Tool 时必须理解的约束
 
 | 约束 | 原因 |
 |---|---|
@@ -398,7 +398,7 @@ while (true) {
 
 ---
 
-## 1.9 小结
+## 5.9 小结
 
 1. **Agent 是配置**：模型、system、权限、步数、请求覆盖；运行行为由 runner 统一实现。
 2. **Tool 是注册表 + 快照**：内置工具也是插件；快照隔离保证请求内一致。

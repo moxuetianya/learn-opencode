@@ -1,4 +1,4 @@
-# 03. UI 接入层：CLI、TUI、HTTP Server 与 Client
+# 7. UI 接入层：CLI、TUI、HTTP Server 与 Client
 
 > 本课回答：V2 的界面层怎么分层？TUI 和 server 是同一进程吗？`opencode run` 走什么链路？
 > Web / Desktop 如何复用同一套协议？
@@ -8,7 +8,7 @@
 
 ---
 
-## 3.1 一张图
+## 7.1 一张图
 
 ```
 ┌─ 客户端进程（可多个）──────────────────────────────┐
@@ -33,9 +33,9 @@
 
 ---
 
-## 3.2 CLI
+## 7.2 CLI
 
-### 3.2.1 入口
+### 7.2.1 入口
 
 `packages/cli/src/index.ts`：
 
@@ -47,7 +47,7 @@
 命令通过 **Effect 的 `unstable/cli`** 定义，不是 yargs。
 Handler 按需动态 import（`commands/handlers/*`），保持启动轻量。
 
-### 3.2.2 命令面
+### 7.2.2 命令面
 
 | 命令 | 作用 |
 |---|---|
@@ -61,9 +61,9 @@ Handler 按需动态 import（`commands/handlers/*`），保持启动轻量。
 | `opencode auth/mcp/plugin/models/session/stats/pair/reload/upgrade ...` | 管理与诊断 |
 
 `--server <url>` 直连显式 server；`--standalone` 起私享 server；默认走
-`Service.ensure` 发现/拉起共享 daemon（第 10 课）。
+`Service.ensure` 发现/拉起共享 daemon（第 11 课）。
 
-### 3.2.3 `opencode run` 的链路
+### 7.2.3 `opencode run` 的链路
 
 `commands/handlers/run.ts` → `run/run.ts` → `run/noninteractive.ts`：
 
@@ -85,9 +85,9 @@ ServerConnection.resolve()            得到 endpoint
 
 ---
 
-## 3.3 TUI
+## 7.3 TUI
 
-### 3.3.1 技术栈
+### 7.3.1 技术栈
 
 - 渲染：`@opentui/solid`（SolidJS + 原生终端渲染器），**不是 React/Ink**；
 - 入口：`packages/tui/src/app.tsx` 的 `run(input)`；
@@ -104,7 +104,7 @@ ServerConnection.resolve()            得到 endpoint
    Keymap → Toast → Route → Client → Data → Local → Permission → Plugin …
 6. 进入初始路由（Home 或 Session）
 
-### 3.3.2 数据层
+### 7.3.2 数据层
 
 `packages/tui/src/app.tsx` 的 `DataProvider` 包装
 `packages/client/src/solid/data.ts` 的 `createData()`：
@@ -126,7 +126,7 @@ createData({ api, event, connection, directory })
 
 因此提交不等待网络，界面不会"卡一下"。
 
-### 3.3.3 事件流
+### 7.3.3 事件流
 
 `packages/client/src/solid/connection.ts`：
 
@@ -141,7 +141,7 @@ api.event.subscribe()                  GET /api/event (SSE)
 TUI 的 `context/client.tsx` 把事件分发到 `createGlobalEmitter`，
 `context/data.tsx` 与各 Provider 订阅自己关心的事件类型。
 
-### 3.3.4 渲染
+### 7.3.4 渲染
 
 - 会话列表与消息在 `packages/session-ui/src/`（message、tools、timeline、pierre diff…）；
 - TUI 路由在 `packages/tui/src/routes/session/`；
@@ -149,7 +149,7 @@ TUI 的 `context/client.tsx` 把事件分发到 `createGlobalEmitter`，
 - `session.execution.*` 驱动 footer 状态（busy/retry/idle）；
 - `permission.asked` / `form.created` 渲染为对话框，回复走对应 API。
 
-### 3.3.5 持久终端
+### 7.3.5 持久终端
 
 终端不是 TUI 本地进程，而是 **server 持有的 persistent PTY**：
 
@@ -171,9 +171,9 @@ TUI 的 `context/client.tsx` 把事件分发到 `createGlobalEmitter`，
 
 ---
 
-## 3.4 HTTP Server
+## 7.4 HTTP Server
 
-### 3.4.1 启动
+### 7.4.1 启动
 
 `opencode serve` → `cli/src/server-process.ts`：
 
@@ -195,7 +195,7 @@ options（mode = default | service | stdio）
 默认端口：服务模式按 channel（49374 / 49375 / hash），前台默认从 4096 起找空位。
 `/api/info` 不需要完整应用就绪，客户端用它探活与判断版本。
 
-### 3.4.2 协议
+### 7.4.2 协议
 
 `packages/protocol/src/api.ts` 组合的 group：
 
@@ -231,15 +231,15 @@ session / message / permission / form / pty / location / event
 - `session-location`：从 session ID 反查 Location；
 - CORS：由 `--cors` / service config 控制。
 
-### 3.4.3 错误与就绪
+### 7.4.3 错误与就绪
 
 - 启动中：`/api/info` 返回 503 + `retry-after: 1`；
 - 启动失败：503 + `code: service_failed`，提示 `opencode service restart`；
-- 版本不匹配：客户端负责决定复用/重启/报错（第 10 课）。
+- 版本不匹配：客户端负责决定复用/重启/报错（第 11 课）。
 
 ---
 
-## 3.5 Client 包
+## 7.5 Client 包
 
 `packages/client/src/` 有三个入口：
 
@@ -254,7 +254,7 @@ session / message / permission / form / pty / location / event
 
 ---
 
-## 3.6 Web / Desktop
+## 7.6 Web / Desktop
 
 - `packages/app`：Vite + Solid Web 应用，复用 `packages/session-ui`；
 - `packages/desktop`：Electron 壳，复用 app 与 client；
@@ -263,9 +263,9 @@ session / message / permission / form / pty / location / event
 
 ---
 
-## 3.7 三条数据流
+## 7.7 三条数据流
 
-### 3.7.1 TUI 提交
+### 7.7.1 TUI 提交
 
 ```
 prompt/index.tsx submit
@@ -277,7 +277,7 @@ prompt/index.tsx submit
   → data store 替换 pending 行
 ```
 
-### 3.7.2 CLI 非交互
+### 7.7.2 CLI 非交互
 
 ```
 client.event.subscribe()
@@ -286,7 +286,7 @@ client.event.subscribe()
   → 渲染或 JSON 输出
 ```
 
-### 3.7.3 Web/外部
+### 7.7.3 Web/外部
 
 ```
 SDK/Client → HTTP → server handler → Core
@@ -295,7 +295,7 @@ Core publish → event 行 + 投影 → PubSub → SSE → client store
 
 ---
 
-## 3.8 小结
+## 7.8 小结
 
 1. **UI 层只有客户端**：CLI、TUI、Web、Desktop 都通过 HTTP + SSE 连接 server。
 2. **TUI 是普通客户端**：Solid + OpenTUI，不再有 worker/RPC 桥。

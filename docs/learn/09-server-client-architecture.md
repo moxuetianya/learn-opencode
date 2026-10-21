@@ -1,4 +1,4 @@
-# 08. Server / Client 架构：职责边界与执行位置
+# 9. Server / Client 架构：职责边界与执行位置
 
 > 本课回答三个问题：
 > 1. server 和 client 各负责什么？
@@ -10,7 +10,7 @@
 
 ---
 
-## 8.1 一张图
+## 9.1 一张图
 
 ```
 ┌─ Client 进程 ─────────────────────────┐      ┌─ Client 进程 ────────────────────┐
@@ -37,7 +37,7 @@ client 的全部工作 = 组装请求 + 渲染事件 + 本地偏好/历史。
 
 ---
 
-## 8.2 包拓扑与依赖方向
+## 9.2 包拓扑与依赖方向
 
 ```
 schema ──▶ protocol ──▶ server
@@ -66,9 +66,9 @@ schema ──▶ protocol ──▶ server
 
 ---
 
-## 8.3 tool-use 在哪执行
+## 9.3 tool-use 在哪执行
 
-### 8.3.1 执行链
+### 9.3.1 执行链
 
 ```
 SessionRunner.drain
@@ -93,7 +93,7 @@ SessionRunner.drain
 - 工具执行前会先发布 `session.tool.called` durable 事件，
   崩在中途也能看出"哪些工具正在执行"。
 
-### 8.3.2 client 看到什么
+### 9.3.2 client 看到什么
 
 client 只收到：
 
@@ -104,7 +104,7 @@ client 只收到：
 
 它不持有工具实现，也不执行权限判断（权限询问由 server 发起，client 只回复）。
 
-### 8.3.3 权限在哪
+### 9.3.3 权限在哪
 
 - `Permission.assert` 在工具叶子内调用，**server 进程**；
 - 需要询问时发布 `permission.asked` 事件；
@@ -115,7 +115,7 @@ client 只收到：
 
 ---
 
-## 8.4 会话执行链路
+## 9.4 会话执行链路
 
 ```
 POST /api/session/:id/prompt
@@ -145,9 +145,9 @@ POST /api/session/:id/prompt
 
 ---
 
-## 8.5 多客户端为什么共享
+## 9.5 多客户端为什么共享
 
-### 8.5.1 daemon 模型
+### 9.5.1 daemon 模型
 
 默认所有 CLI/TUI 都连接**同一个后台 daemon**：
 
@@ -160,7 +160,7 @@ opencode service status
 - 读注册文件 + `GET /api/info` 探活；
 - 健康且版本匹配 → 复用；
 - 版本不匹配 → 按 `mismatch` 策略替换/忽略/报错；
-- 不存在/假死 → 由客户端 spawn 一个 contender（第 10 课）。
+- 不存在/假死 → 由客户端 spawn 一个 contender（第 11 课）。
 
 ```
 TUI #1 ─┐
@@ -170,15 +170,15 @@ CLI run ┘                         │
                                    └─ 同一事件流
 ```
 
-### 8.5.2 共享状态 ≠ 共享进程
+### 9.5.2 共享状态 ≠ 共享进程
 
 - 默认是共享进程（daemon）；
 - 但不是必须：`--standalone` 或多个独立 server 仍然会"看到彼此的会话"，
   因为数据在同一个全局 SQLite；
 - 这正是为什么"打开的 opencode 看不到另一个 opencode 的会话"通常不是进程问题，
-  而是 **channel 不同导致库文件不同**（第 09 课）。
+  而是 **channel 不同导致库文件不同**（第 10 课）。
 
-### 8.5.3 一个 server 服务多个目录
+### 9.5.3 一个 server 服务多个目录
 
 `LocationMiddleware` 从请求解析目录：
 
@@ -193,16 +193,16 @@ SDK/client 会自动带目录信息。
 
 ---
 
-## 8.6 通信协议
+## 9.6 通信协议
 
-### 8.6.1 HTTP
+### 9.6.1 HTTP
 
 - 所有 API 在 `/api/*`（`packages/protocol/src/api.ts`）；
 - 认证：Basic Auth（`opencode` + service password）；
 - Schema 解码失败 → 400；
 - 路径参数 / 查询参数 / body 都由 Effect Schema 定义。
 
-### 8.6.2 SSE
+### 9.6.2 SSE
 
 | 端点 | 用途 |
 |---|---|
@@ -212,7 +212,7 @@ SDK/client 会自动带目录信息。
 客户端连接要求第一帧是 `server.connected`；服务端每 15s 发 keepalive；
 客户端 45s 无字节判定 stall 并重连。
 
-### 8.6.3 WebSocket
+### 9.6.3 WebSocket
 
 只用于 PTY：
 
@@ -224,7 +224,7 @@ SDK/client 会自动带目录信息。
 
 ---
 
-## 8.7 Location / Workspace / Project
+## 9.7 Location / Workspace / Project
 
 | 概念 | 定义 | 用途 |
 |---|---|---|
@@ -239,7 +239,7 @@ SDK/client 会自动带目录信息。
 
 ---
 
-## 8.8 扩展点：server 端还是 client 端
+## 9.8 扩展点：server 端还是 client 端
 
 | 你想做 | 放哪 | 用什么 |
 |---|---|---|
@@ -257,7 +257,7 @@ SDK/client 会自动带目录信息。
 
 ---
 
-## 8.9 小结
+## 9.9 小结
 
 1. **server 拥有一切有状态执行**：DB、事件、会话编排、模型、工具、权限、PTY。
 2. **client 只发请求、收事件、渲染**；不执行工具、不调用模型。

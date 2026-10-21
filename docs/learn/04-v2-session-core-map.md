@@ -1,10 +1,10 @@
-# 12. V2 Session Core 知识地图：术语、不变式与代码索引
+# 4. V2 Session Core 知识地图：术语、不变式与代码索引
 
-> 本课是前 11 课的收口：把 v2 会话核心的**术语、不变式、所有"主动发起"入口**汇总成一张地图，
+> 本课是前 12 课的收口：把 v2 会话核心的**术语、不变式、所有"主动发起"入口**汇总成一张地图，
 > 并给出按图索骥的源码阅读顺序。内容依据仓库根 `AGENTS.md` 的 "V2 Session Core" 约束与
 > `packages/core/src/session/` 当前实现整理；与前几课重叠处只放索引。
 
-## 12.1 词汇表（严格语义）
+## 4.1 词汇表（严格语义）
 
 | 术语 | 定义 | 代码 |
 |---|---|---|
@@ -16,11 +16,11 @@
 | **Claim / Release** | write-ahead 执行声明：started 事件同事务写 `time_suspended`；终态释放；shutdown/崩溃保留 → 重启恢复标记 | `execution.ts`、`store.ts` |
 | **Wake** | 协调器的"门铃"：运行中合并（`pendingWake`），空闲起新 drain；`resume: false` 的 admit 不产生 wake | `run-coordinator.ts` |
 | **Admit-only** | `resume: false` 语义：只准入不调度执行（用户 shell 通知、重启恢复通知） | `session.ts` |
-| **Location** | `{directory, workspaceID?, project}`：runner/模型解析/工具/权限/FS 的放置单元；缺省 workspaceID = 隐式本地 | 第 8 课 §8.6 |
+| **Location** | `{directory, workspaceID?, project}`：runner/模型解析/工具/权限/FS 的放置单元；缺省 workspaceID = 隐式本地 | 第 9 课 §9.7 |
 | **Instruction epoch** | 指令纪元：compaction 完成推进 epoch；会话移动保留；revert 提交清除 | AGENTS.md V2 Session Core |
-| **Contender** | 客户端为拉起服务 spawn 的候选 daemon 进程；多者竞争由注册文件仲裁 | 第 10 课 §10.4 |
+| **Contender** | 客户端为拉起服务 spawn 的候选 daemon 进程；多者竞争由注册文件仲裁 | 第 11 课 §11.4 |
 
-## 12.2 不变式清单（AGENTS.md 约束 ↔ 代码落点）
+## 4.2 不变式清单（AGENTS.md 约束 ↔ 代码落点）
 
 **准入与执行分离**
 
@@ -43,7 +43,7 @@
 - provider 专属的原生压缩封在 `@opencode/ai` 的 `LLMClient.compact` 之后；
   `SessionCompaction` 依据模型 `compaction` 设置选 summary 或 native，并独占
   路由来源、请求收缩、重试策略、中断、用量记账、checkpoint 持久化。
-  `packages/core/src/session/compaction.ts`（触发器：`auto`/`overflow`/`manual`，§12.4）。
+  `packages/core/src/session/compaction.ts`（触发器：`auto`/`overflow`/`manual`，§4.4）。
 
 **指令系统**
 
@@ -70,15 +70,15 @@
 
 - durable 事件只记**不可约新事实**；可由有序聚合史推导的状态不要重复记录；
   消费者需要自洽视图时把先前/派生状态放进**投影与读模型**（enrichment）。
-  `bus.ts`（发布=单事务：投影 + event 行 + PubSub 扇出）、第 9 课。
+  `bus.ts`（发布=单事务：投影 + event 行 + PubSub 扇出）、第 10 课。
 
-## 12.3 "谁会主动发起/推进对话"——全部入口总表
+## 4.3 "谁会主动发起/推进对话"——全部入口总表
 
 | 入口 | 准入类型 | 默认 delivery | wake? | 代码 |
 |---|---|---|---|---|
 | 用户 prompt | `user` | `steer` | ✅（`resume:false` 可关） | `session.ts` |
 | synthetic（通用） | `synthetic` | `steer` | ✅（`resume:false` 可关） | `session.ts` |
-| agent 后台 shell 完成 | `synthetic` | `steer` | ✅ | 第 11 课 |
+| agent 后台 shell 完成 | `synthetic` | `steer` | ✅ | 第 12 课 |
 | 用户提交 shell 完成 | `synthetic` | `steer` | ❌ admit-only | `session.ts` |
 | 重启恢复通知（shell/重启提示） | `synthetic` | `steer` | ❌（shell）/ 会话本身被 resume | `restart.ts` |
 | subagent 完成 | `synthetic`（父会话） | `steer` | ✅（默认；仅重启恢复且父会话 suspended 时 `resume:false`） | `subagent-completion.ts` |
@@ -86,12 +86,12 @@
 | 会话移动（move） | `move` 控制项 | — | ✅（换 Location 重入） | `move.ts`、`inbox.ts` |
 | skill 激活 | 事件 + 可见消息 | — | ✅（`resume:false` 可关） | `session.ts` |
 | 上/下文指令文件变化 | synthetic 注入（去重账本） | — | 随当前执行 | `instructions.ts` |
-| 重启恢复（claim 存活） | resume 整个会话 | — | ✅（resume 本身） | 第 10 课 §10.7 |
+| 重启恢复（claim 存活） | resume 整个会话 | — | ✅（resume 本身） | 第 11 课 §11.7 |
 
 控制项优先级：`promote` 在任何边界都不越过第一个 `compaction`/`move` 控制项；
 steered compaction 在 step 边界插队到最前（`inbox.ts` `pendingSteers` 的重排）。
 
-## 12.4 Compaction 触发速查（`compaction.ts`）
+## 4.4 Compaction 触发速查（`compaction.ts`）
 
 | reason | 触发 | 行为 |
 |---|---|---|
@@ -99,25 +99,25 @@ steered compaction 在 step 边界插队到最前（`inbox.ts` `pendingSteers` �
 | `overflow` | provider 刚拒绝：上下文超长 | 一个 step 的兜底重建 |
 | `manual` | `/compact` inbox 条目（inputID 对应用户可见消息） | steered，边界优先 |
 
-## 12.5 源码阅读路径建议
+## 4.5 源码阅读路径建议
 
 按依赖顺序读，每步都有前几课对应：
 
 ```
 1. schema          @opencode/schema/session-inbox、persistent-pty   # 数据形状
-2. 收件箱          core/src/session/inbox.ts                        # 第 4/11 课
+2. 收件箱          core/src/session/inbox.ts                        # 第 3/12 课
 3. 协调器          core/src/session/run-coordinator.ts              # wake/claim 语义
 4. 执行            core/src/session/execution.ts                    # claim 同事务、中断
 5. runner          core/src/session/runner/llm.ts                   # 边界循环、step 配额
-6. 恢复            core/src/session/execution/restart.ts            # 第 10 课
-7. 服务生命周期    client/src/effect/service.ts + cli/src/services/ # 第 10 课
-8. 工具            core/src/tool/plugin/{shell,subagent}.ts         # 第 11 课
-9. 压缩/指令      core/src/session/{compaction,instructions}.ts    # 本课 §12.2
+6. 恢复            core/src/session/execution/restart.ts            # 第 11 课
+7. 服务生命周期    client/src/effect/service.ts + cli/src/services/ # 第 11 课
+8. 工具            core/src/tool/plugin/{shell,subagent}.ts         # 第 12 课
+9. 压缩/指令      core/src/session/{compaction,instructions}.ts    # 本课 §4.2
 ```
 
 对照根 `AGENTS.md` 的 "V2 Session Core" 一节逐条核对——那份约束就是这套代码的规格说明。
 
-## 12.6 扩展点速查（写插件时对照）
+## 4.6 扩展点速查（写插件时对照）
 
 | 你想影响 | 位置 | 说明 |
 |---|---|---|
@@ -138,7 +138,7 @@ steered compaction 在 step 边界插队到最前（`inbox.ts` `pendingSteers` �
 | 自定义端点 | `ctx.rpc.register` | server 侧 |
 | UI | `@opencode/plugin/tui` | 客户端，不参与 server hook |
 
-## 12.7 易混点澄清
+## 4.7 易混点澄清
 
 - **"turn" 不要乱用**：文档/代码评审里说单次 LLM 调用用 **step**；"turn" 留给未来
   assistant-turn 单位。
@@ -147,6 +147,6 @@ steered compaction 在 step 边界插队到最前（`inbox.ts` `pendingSteers` �
 - **交付 ≠ 可见**：inbox 行只有在 `promote`（delivered 事件）后才变成可见消息；
   `session_inbox` 里永远只有未消费的工作。
 - **共享状态 ≠ 共享进程**：`--standalone` 或独立 server 各有自己的进程，但全局 SQLite（WAL）
-  让它们看到同一份数据（第 8 课 §8.5.2）。
+  让它们看到同一份数据（第 9 课 §9.5.2）。
 - **服务死 ≠ 会话丢**：执行状态全在 SQLite（claim、inbox、消息投影、Job KV），
-  daemon 死了被调活后一切续上（第 10 课）。
+  daemon 死了被调活后一切续上（第 11 课）。

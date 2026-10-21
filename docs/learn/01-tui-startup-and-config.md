@@ -1,14 +1,14 @@
-# 05. 启动链路：从 `opencode` 命令到 TUI 就绪
+# 1. 启动链路：从 `opencode` 命令到 TUI 就绪
 
 > 本课梳理：命令入口 → 解析 endpoint（共享 daemon / standalone / 显式 URL）→
 > 启动 server（如需要）→ 按 Location 懒加载 Core 服务 → TUI 初始化 → 首批数据同步。
 >
-> 后台服务的发现、竞争、重启恢复细节见第 10 课；配置来源细节见第 07 课。
+> 后台服务的发现、竞争、重启恢复细节见第 11 课；配置来源细节见第 08 课。
 > V1 的"每次启动 spawn 一个 Worker 跑内嵌 server"已不存在。
 
 ---
 
-## 5.0 总览
+## 1.0 总览
 
 ```
 opencode [directory]                    packages/cli/src/index.ts
@@ -42,7 +42,7 @@ GET /api/...                            packages/server
 
 ---
 
-## 5.1 命令入口
+## 1.1 命令入口
 
 `packages/cli/src/index.ts`：
 
@@ -61,7 +61,7 @@ GET /api/...                            packages/server
 
 ---
 
-## 5.2 解析 endpoint
+## 1.2 解析 endpoint
 
 `ServerConnection.resolve()`（`cli/src/services/server-connection.ts`）：
 
@@ -88,7 +88,7 @@ selfCommand() serve --stdio --port 0
 
 ---
 
-## 5.3 TUI 初始化
+## 1.3 TUI 初始化
 
 `packages/cli/src/commands/handlers/default.ts`：
 
@@ -105,7 +105,7 @@ selfCommand() serve --stdio --port 0
 3. `api.file.list({ location: { directory: cwd } })` → 拿 `location`；
    失败则退回 `api.location.get()`；
 4. 发现本地 TUI 插件目录；
-5. 接管 terminal handoff（如果是 daemon 重启后的 TUI 复用手册，见第 10 课）；
+5. 接管 terminal handoff（如果是 daemon 重启后的 TUI 复用手册，见第 11 课）；
 6. 创建 `@opentui/core` renderer：
    - `targetFps: 60`
    - `useMouse` 来自 `cli.json`
@@ -129,9 +129,9 @@ Log → Exit → Epilogue → TuiApp → ErrorBoundary
 
 ---
 
-## 5.4 Server 启动
+## 1.4 Server 启动
 
-### 5.4.1 `opencode serve`
+### 1.4.1 `opencode serve`
 
 `cli/src/commands/handlers/serve.ts` → `cli/src/server-process.ts`：
 
@@ -153,7 +153,7 @@ mode = default | service | stdio
    - 打印 `server listening on ...`；stdout 模式输出 JSON
 6. service 模式等待 `server.shutdown`；stdio 等 stdin 关闭；前台保持运行。
 
-### 5.4.2 HTTP 层
+### 1.4.2 HTTP 层
 
 `packages/server/src/process.ts`：
 
@@ -181,9 +181,9 @@ listen(hostname, port)
 
 ---
 
-## 5.5 Location 懒加载
+## 1.5 Location 懒加载
 
-### 5.5.1 一个 daemon，多套服务图
+### 1.5.1 一个 daemon，多套服务图
 
 `server/src/location.ts` 的 `LocationMiddleware`：
 
@@ -205,7 +205,7 @@ requestRef(request):
 - invalidate 时先解除路由，再关闭权限/表单/RPC、发布 `location.shutdown`；
   正在运行的 step 仍持有借来的服务图，在边界处交接。
 
-### 5.5.2 Location 图里有什么
+### 1.5.2 Location 图里有什么
 
 `core/src/instance.ts` 的 `nodes` 顺序就是启动顺序（依赖关系已由 LayerNode 解析）：
 
@@ -231,10 +231,10 @@ SessionContext → Snapshot → SessionRunnerLLM → Vcs → LocationWatcher
 
 ---
 
-## 5.6 配置与插件在启动中的位置
+## 1.6 配置与插件在启动中的位置
 
 - **Config**：`Config.Service` 在 Location 图里构建，读取 `opencode.json(c)` 与 `.opencode` 目录；
-  具体来源与优先级见第 07 课。
+  具体来源与优先级见第 08 课。
 - **Plugin**：`PluginSupervisor` 在 Config 之后启动，按 `pre → SDK/实例/外部 → post`
   激活；`Plugin.awaitActivation` 是会话准入与模型请求的等待点。
 - **TUI 偏好**：完全在客户端，`cli.json`（`~/.config/opencode/cli.json`），
@@ -242,7 +242,7 @@ SessionContext → Snapshot → SessionRunnerLLM → Vcs → LocationWatcher
 
 ---
 
-## 5.7 首屏同步
+## 1.7 首屏同步
 
 TUI 的 `createData()` 首次同步大致分两批：
 
@@ -274,7 +274,7 @@ mcp / vcs / integration 状态
 
 ---
 
-## 5.8 一次启动的时间线
+## 1.8 一次启动的时间线
 
 ```
 opencode
@@ -303,13 +303,13 @@ opencode
 
 ---
 
-## 5.9 小结
+## 1.9 小结
 
 1. **TUI 是客户端**：启动时解析 endpoint，连不上就按策略发现/拉起 daemon。
 2. **Server 有两层启动**：进程级 HTTP/Core 图，Location 级按目录服务图。
 3. **配置与插件在 Location 启动时加载**，不是进程启动时。
 4. **`/api/info` 先于 ready**：客户端能区分 starting / failed / incompatible。
-5. **重启恢复在 server 就绪后自动执行**（第 10 课）。
+5. **重启恢复在 server 就绪后自动执行**（第 11 课）。
 6. **TUI 偏好完全在客户端**：`cli.json`，server 不感知。
 
 > **迁移小注**：`packages/opencode/src/cli/cmd/tui.ts`、`cli/tui/worker.ts`、

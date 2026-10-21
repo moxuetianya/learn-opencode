@@ -1,6 +1,6 @@
 # 附录 A：V2 代码地图
 
-> 这是**辅助索引**，不是教程主线。建议先读 05/06，再回来按目录查。
+> 这是**辅助索引**，不是教程主线。建议先读 01/02，再回来按目录查。
 > 所有路径基于当前工作区（opencode 2.0.24）。
 >
 > 不要按行号记代码；V2 迭代快，本页只给目录与职责。
@@ -201,17 +201,17 @@ packages/server/src/
 ### 想开发插件/工具
 
 ```
-1. 01（组件）+ 02（扩展点）
+1. 06（扩展点）+ 05（组件）
 2. code-examples.md（最小插件/工具）
 3. tool.ts + tool/plugin/skill.ts（内置工具长什么样）
 4. plugin/hooks.ts + session/model-request.ts（hook 何时触发）
-5. 06（请求组装全链路）
+5. 02（请求组装全链路）
 ```
 
 ### 想理解会话内核
 
 ```
-1. 05 + 06
+1. 01 + 02
 2. inbox.ts
 3. run-coordinator.ts
 4. execution.ts
@@ -224,7 +224,7 @@ packages/server/src/
 ### 想理解数据/恢复
 
 ```
-1. 09
+1. 10
 2. bus.ts
 3. session/projector.ts
 4. session/store.ts

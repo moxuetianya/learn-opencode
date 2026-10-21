@@ -1,4 +1,4 @@
-# 02. Plugin 与 Hook：V2 扩展机制
+# 6. Plugin 与 Hook：V2 扩展机制
 
 > 本课回答：V2 的插件长什么样？有哪些扩展点？Hook 与 Transform 的区别是什么？
 > 多个插件按什么顺序生效？外部插件如何加载和热更新？
@@ -8,7 +8,7 @@
 
 ---
 
-## 2.1 两层插件模型
+## 6.1 两层插件模型
 
 V2 把"扩展"拆成两种能力，它们都在插件的 Effect scope 内注册，scope 关闭即自动清理：
 
@@ -41,7 +41,7 @@ Plugin (Effect)
 
 ---
 
-## 2.2 Hook domain 一览
+## 6.2 Hook domain 一览
 
 `PluginHooks` 的 domain 和事件来自 `packages/plugin/src/effect/*`：
 
@@ -93,7 +93,7 @@ Plugin (Effect)
 
 ---
 
-## 2.3 `PluginHooks.trigger` 的执行语义
+## 6.3 `PluginHooks.trigger` 的执行语义
 
 `packages/core/src/plugin/hooks.ts`：
 
@@ -118,7 +118,7 @@ trigger(domain, name, event)
 
 ---
 
-## 2.4 Transform 的生效方式
+## 6.4 Transform 的生效方式
 
 Transform 不是"立即改当前对象"，而是**登记到 State 的变换列表里，按注册顺序重放**：
 
@@ -140,9 +140,9 @@ State.create({ initial, editor })
 
 ---
 
-## 2.5 插件加载与排序
+## 6.5 插件加载与排序
 
-### 2.5.1 顺序
+### 6.5.1 顺序
 
 `plugin/supervisor.ts` 的 `activate()`：
 
@@ -165,7 +165,7 @@ pre（内置 pre → SDK/实例 → 外部包） → post（内置 post）
 - 实例插件排在 SDK 之后，因此实例的显式选择覆盖全局默认。
 - 重复 ID：保留 boot 顺序中的第一个，后面的作为 failed 上报。
 
-### 2.5.2 `pre` 里有什么
+### 6.5.2 `pre` 里有什么
 
 `plugin/internal.ts` 的 `pre` 是"运行时基础设施与工具"：
 
@@ -176,7 +176,7 @@ Agent 内置定义、Plan 模式、Command、Skill、models.dev、Provider 插�
 webfetch/websearch/write）…
 ```
 
-### 2.5.3 `post` 里有什么
+### 6.5.3 `post` 里有什么
 
 `post` 是"读取用户配置并改写注册表"的插件：
 
@@ -190,7 +190,7 @@ ConfigCompatibility、ConfigSkill、ConfigProvider、ConfigWebSearch、ConfigPol
 顺序很关键：例如 `ConfigAgent` 必须在 `Agent` 内置定义之后运行，
 才能覆盖 `build/plan/...` 并加入用户 agent。
 
-### 2.5.4 失败与热更新
+### 6.5.4 失败与热更新
 
 `Plugin.Service.activate()`：
 
@@ -203,9 +203,9 @@ ConfigCompatibility、ConfigSkill、ConfigProvider、ConfigWebSearch、ConfigPol
 
 ---
 
-## 2.6 外部插件
+## 6.6 外部插件
 
-### 2.6.1 声明
+### 6.6.1 声明
 
 ```jsonc
 // opencode.jsonc
@@ -228,7 +228,7 @@ ConfigCompatibility、ConfigSkill、ConfigProvider、ConfigWebSearch、ConfigPol
 （`PluginSourceDirectory.discover` 读取 `plugin` / `plugins` 目录；
 配置里显式写路径时只接受目录，不接受单个 `.ts` 文件。）
 
-### 2.6.2 模块契约
+### 6.6.2 模块契约
 
 `plugin/module.ts` 接受默认导出：
 
@@ -265,7 +265,7 @@ export default {
 `engines`/兼容性、managed policy（`integration.use`）在加载前检查；
 失败会记录在 `Plugin.Info.state = failed`，不会拖垮整个进程。
 
-### 2.6.3 插件上下文
+### 6.6.3 插件上下文
 
 `Context`（`packages/plugin/src/effect/plugin.ts`）包含：
 
@@ -289,9 +289,9 @@ export default {
 
 ---
 
-## 2.7 两个最小示例
+## 6.7 两个最小示例
 
-### 2.7.1 注册一个只读工具
+### 6.7.1 注册一个只读工具
 
 ```ts
 import { define } from "@opencode/plugin/effect/plugin"
@@ -317,7 +317,7 @@ export default define({
 > Core 内部插件可以直接使用 Location 范围的 `FSUtil.Service`。两者都不要直接
 > `node:fs` 绕过 Location 约束。
 
-### 2.7.2 给模型请求加 header
+### 6.7.2 给模型请求加 header
 
 ```ts
 export default define({
@@ -331,7 +331,7 @@ export default define({
 })
 ```
 
-### 2.7.3 拦截工具参数
+### 6.7.3 拦截工具参数
 
 ```ts
 import { Tool } from "@opencode/schema/tool"
@@ -358,7 +358,7 @@ export default define({
 
 ---
 
-## 2.8 权限 Hook 与内置策略
+## 6.8 权限 Hook 与内置策略
 
 `Permission.evaluate(action, resource, ...rulesets)`：
 
@@ -382,7 +382,7 @@ Agent.Info.permissions（包含配置里的全局 permissions）
 
 ---
 
-## 2.9 TUI 插件
+## 6.9 TUI 插件
 
 TUI 也有一套独立插件接口（`@opencode/plugin/tui`）：
 
@@ -404,7 +404,7 @@ export default define({
 
 ---
 
-## 2.10 小结
+## 6.10 小结
 
 1. **Transform 建表，Hook 改事件**：前者是有序重放的注册表，后者是串行的事件回调。
 2. **顺序即语义**：内置 pre → SDK/实例/外部 → 内置 post；后注册覆盖先注册。

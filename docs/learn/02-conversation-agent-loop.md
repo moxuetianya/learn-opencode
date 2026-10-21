@@ -1,14 +1,14 @@
-# 06. 一次对话的全过程：从按下回车到流式渲染
+# 2. 一次对话的全过程：从按下回车到流式渲染
 
 > 本课把"一次对话"拆成可理解的阶段：客户端提交 → 输入准入 → 调度 → 组上下文 →
 > 模型调用 → 工具执行 → 步骤结算 → 事件回流。重点是**每个阶段你能扩展什么**。
 >
 > 本课不追求源码行号；需要精确契约时看 `packages/schema/src/session-*.ts`，
-> 需要扩展点时看第 02 课与每节末尾的「扩展点」提示。
+> 需要扩展点时看第 06 课与每节末尾的「扩展点」提示。
 
 ---
 
-## 6.0 时序总览
+## 2.0 时序总览
 
 ```
 [TUI 输入框 submit]
@@ -42,9 +42,9 @@ Bus publish → 投影 + event 行 → SSE → client store → 渲染
 
 ---
 
-## 6.1 客户端：回车后发生什么
+## 2.1 客户端：回车后发生什么
 
-### 6.1.1 组装输入
+### 2.1.1 组装输入
 
 `tui/src/component/prompt/index.tsx` 的 `submit(delivery)`：
 
@@ -62,7 +62,7 @@ Bus publish → 投影 + event 行 → SSE → client store → 渲染
 
 `delivery` 来自 UI：默认 `steer`，用户可以显式排队（`queue`）。
 
-### 6.1.2 乐观提交
+### 2.1.2 乐观提交
 
 `client/src/solid/data.ts` 的 `session.prompt()`：
 
@@ -73,7 +73,7 @@ Bus publish → 投影 + event 行 → SSE → client store → 渲染
 
 这就是"提交不卡 UI"的来源，不是 Web Worker，也不是本地假渲染。
 
-### 6.1.3 为什么输入框在 busy 时仍可用
+### 2.1.3 为什么输入框在 busy 时仍可用
 
 `tui/src/routes/session/index.tsx` 只在**权限/表单弹窗**时禁用输入。
 模型运行状态不参与 `disabled`。Esc 连按两次是独立的中断命令。
@@ -82,7 +82,7 @@ Bus publish → 投影 + event 行 → SSE → client store → 渲染
 
 ---
 
-## 6.2 服务端准入：只记录，不执行
+## 2.2 服务端准入：只记录，不执行
 
 `Session.prompt`（`core/src/session/session.ts`）：
 
@@ -123,7 +123,7 @@ existing = inbox.reconcile({ id, sessionID, type: "user", delivery })
 
 ---
 
-## 6.3 调度：门铃与 busy period
+## 2.3 调度：门铃与 busy period
 
 `SessionExecution.wake` 委托给 `SessionRunCoordinator`：
 
@@ -140,7 +140,7 @@ existing = inbox.reconcile({ id, sessionID, type: "user", delivery })
 
 ---
 
-## 6.4 Runner：边界决定一切
+## 2.4 Runner：边界决定一切
 
 `SessionRunner.drain` 的核心是 `advanceToStep()`：
 
@@ -171,7 +171,7 @@ existing = inbox.reconcile({ id, sessionID, type: "user", delivery })
 
 ---
 
-## 6.5 上下文：每次请求重新解析
+## 2.5 上下文：每次请求重新解析
 
 `SessionContext.select()` 固定四样东西：
 
@@ -213,7 +213,7 @@ CodeMode catalog
 
 ---
 
-## 6.6 请求组装：hooks 的完整链路
+## 2.6 请求组装：hooks 的完整链路
 
 `SessionContext.request.primary(...)` → `SessionModelRequest.prepare("primary", ...)`：
 
@@ -262,7 +262,7 @@ CodeMode catalog
 
 ---
 
-## 6.7 Step：一次逻辑 LLM 调用
+## 2.7 Step：一次逻辑 LLM 调用
 
 `SessionStep.attempt` 的职责：
 
@@ -312,9 +312,9 @@ tool.execute.before   可改 input，可失败拒绝
 
 ---
 
-## 6.8 事件：从 SQLite 到像素
+## 2.8 事件：从 SQLite 到像素
 
-### 6.8.1 发布
+### 2.8.1 发布
 
 `Bus.publish`：
 
@@ -330,7 +330,7 @@ tool.execute.before   可改 input，可失败拒绝
 - **ephemeral**：delta（`session.text.delta`、`session.reasoning.delta`、tool progress），
   不落库，只用于实时渲染；重连后靠 durable part + 当前消息补齐。
 
-### 6.8.2 传输
+### 2.8.2 传输
 
 - `GET /api/event`：全局 SSE，客户端默认入口；
 - `GET /api/experimental/session/:id/log`：按 `after` 重放 durable 事件；
@@ -343,7 +343,7 @@ tool.execute.before   可改 input，可失败拒绝
 - 45s 无字节视为 stall（服务端每 15s keepalive）；
 - 断线 1s 退避重连。
 
-### 6.8.3 渲染
+### 2.8.3 渲染
 
 `client/src/solid/data.ts` 把事件归并到 store：
 
@@ -363,7 +363,7 @@ tool.execute.before   可改 input，可失败拒绝
 
 ---
 
-## 6.9 失败、重试与压缩
+## 2.9 失败、重试与压缩
 
 ### 重试
 
@@ -398,7 +398,7 @@ tool.execute.before   可改 input，可失败拒绝
 
 ---
 
-## 6.10 完整时间线（浓缩）
+## 2.10 完整时间线（浓缩）
 
 ```
 T1  TUI submit
@@ -437,7 +437,7 @@ T10 TUI：SSE → 10ms batch → 消息/工具卡/footer 更新
 
 ---
 
-## 6.11 开发插件时最该记住的五件事
+## 2.11 开发插件时最该记住的五件事
 
 1. **输入从 `session.prompt` 进**：不要试图直接改历史；准入是唯一入口。
 2. **工具从 `tool.transform` 注册**：`session.context` 里改定义只影响"广告什么"，

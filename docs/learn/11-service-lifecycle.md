@@ -1,4 +1,4 @@
-# 10. 后台服务生命周期：daemon 死了之后，怎么被"调活"
+# 11. 后台服务生命周期：daemon 死了之后，怎么被"调活"
 
 > 本课回答：**V2 的后台进程（daemon）直接结束后，能被主动调起吗？** 结论：能，但不是它自己复活——
 > opencode 没有 launchd/systemd 级别的守护或外部 watchdog，**复活是懒式的、由下一个客户端启动驱动的**。
@@ -6,9 +6,9 @@
 > `Service.ensure`：发现服务不在（或假死/版本不符），就**由客户端进程把服务重新 spawn 出来**，
 > 对用户表现为透明。
 >
-> 承接第 8 课（§8.5 daemon 模型）的进程拓扑；本课深入生命周期的每个环节。
+> 承接第 9 课（§9.5 daemon 模型）的进程拓扑；本课深入生命周期的每个环节。
 
-## 10.1 一张图：谁发现谁、谁拉起谁
+## 11.1 一张图：谁发现谁、谁拉起谁
 
 ```
 客户端进程（TUI / api / run / Desktop）
@@ -30,7 +30,7 @@
 
 **核心不变式：server 死了不会自愈；但客户端每次启动都会把它调活。**
 
-## 10.2 发现契约：注册文件 `service.json`
+## 11.2 发现契约：注册文件 `service.json`
 
 **完整的发现契约就是一个文件**（`packages/client/src/service.ts` 注释："That file is the
 complete discovery contract — reading it is all a client needs to connect"）：
@@ -59,12 +59,12 @@ complete discovery contract — reading it is all a client needs to connect"）�
 |---|---|
 | daemon 启动监听后 | 原子写入（tmp + rename），`ServiceRegistration.register`（`packages/cli/src/services/service-registration.ts`） |
 | daemon 优雅退出 | scope finalizer 里检查"仍拥有注册"则删除文件（self-evict，`service-registration.ts`） |
-| daemon 被 SIGKILL | 文件残留（stale），由客户端探测失败兜底（见 10.3） |
+| daemon 被 SIGKILL | 文件残留（stale），由客户端探测失败兜底（见 11.3） |
 | 文件被别的实例覆盖 | 注册后 fork 的自检 fiber 每 5s 回读文件，五个字段不再全等（`owns()` 失败）→ 记日志并主动 shutdown |
 
-## 10.3 客户端调起：`Service.ensure`
+## 11.3 客户端调起：`Service.ensure`
 
-### 10.3.1 入口分发
+### 11.3.1 入口分发
 
 `packages/cli/src/services/server-connection.ts` `resolve()`：
 
@@ -79,7 +79,7 @@ complete discovery contract — reading it is all a client needs to connect"）�
 `replace` 直接 ensure 替换；`ignore` 忽略版本差异复用；`error` 先 discover 兼容版，
 发现仅版本不符的在位者则报错（`resolveManaged`，server-connection.ts）。
 
-### 10.3.2 ensure 主循环（`packages/client/src/effect/service.ts`）
+### 11.3.2 ensure 主循环（`packages/client/src/effect/service.ts`）
 
 ```
 ensure():
@@ -101,7 +101,7 @@ ensure():
          清 PTY handoff → terminate(旧 pid) → evict → 立即 recruit
 ```
 
-### 10.3.3 关键参数（`packages/client/src/service-timing.ts`）
+### 11.3.3 关键参数（`packages/client/src/service-timing.ts`）
 
 | 参数 | 值 | 含义 |
 |---|---|---|
@@ -112,7 +112,7 @@ ensure():
 | `promiseTimeout` | 120s | 整个 ensure 的墙钟预算 |
 | `stopPollInterval × attempts` | 50ms × 100 ≈ 5s | stop 的 SIGTERM→SIGKILL 升级窗口 |
 
-### 10.3.4 contender：spawn 出来的"竞争者"
+### 11.3.4 contender：spawn 出来的"竞争者"
 
 `packages/client/src/service-contender.ts`：
 
@@ -130,15 +130,15 @@ child.unref()            // 从客户端事件循环摘除
   （`packages/cli/src/services/service-config.ts`，`selfCommand()` 保证 spawn 的是当前二进制）
 - `contenderPool`：**最多保留 2 个尝试**；有服务回答就重置退避；尝试干净退出（说明别人赢了）
   则退避翻倍（5s→30s）；收集第一个失败用于最终报错（带 stderr 尾部）
-- 竞争是特性不是 bug：多个客户端同时发现服务死了会各自 spawn，由服务端仲裁收敛（见 10.4）
+- 竞争是特性不是 bug：多个客户端同时发现服务死了会各自 spawn，由服务端仲裁收敛（见 11.4）
 
-## 10.4 服务端：注册即仲裁（first-writer-wins）
+## 11.4 服务端：注册即仲裁（first-writer-wins）
 
 `opencode serve --service` 启动后（`packages/cli/src/server-process.ts` `processEffect`）：
 
 1. **在位者检查**：配置了固定端口时先 `Service.incumbent` 探测同 URL——已有协议兼容的服务
    在位（含正在启动）就**静默退出**（server-process.ts）
-2. 起 HTTP server（默认 hostname 127.0.0.1；端口：channel 默认值见 10.8）
+2. 起 HTTP server（默认 hostname 127.0.0.1；端口：channel 默认值见 11.8）
 3. `onListen` 回调：密码未持久化则先写入 service 配置（`ServiceConfig.password`，跨重启复用，
    `service-config.ts`），然后 `ServiceRegistration.register`：
    - tmp + rename 原子写注册文件（`0600`）
@@ -151,7 +151,7 @@ child.unref()            // 从客户端事件循环摘除
 **仲裁语义**：多个 contender 写同一个文件，只有一个能"拥有"它；输家读到别人的 id 就自杀。
 客户端 ensure 轮询注册文件 + 探活，最终只会有一个 daemon 存活并被所有人复用。
 
-## 10.5 停止与替换：信号升级与 PTY 策略
+## 11.5 停止与替换：信号升级与 PTY 策略
 
 `Service.stop`（`packages/client/src/effect/service.ts`）：
 
@@ -174,7 +174,7 @@ stop({ pty: "clear" | "handoff" }):
 `terminate` 的比较基准是 **pid 本身**而不是注册文件：注册可能在信号发出前后易手/消失，
 只有被 signalled 的进程能说明自己是否已停（`service.ts` 注释）。
 
-## 10.6 PTY handoff：持久终端跨 daemon 重启
+## 11.6 PTY handoff：持久终端跨 daemon 重启
 
 TUI 里跑的持久终端（`/api/persistent-pty/*`）属于 daemon，但 daemon 被替换时不应杀掉用户的长跑终端：
 
@@ -185,7 +185,7 @@ TUI 里跑的持久终端（`/api/persistent-pty/*`）属于 daemon，但 daemon
   解码失败则降级为"终端从头开始"并记警告；
 - 复用成功时 `PtyHandoff.complete`，服务假死被强杀时 `PtyHandoff.clear`（终端保不住要明说）。
 
-## 10.7 调活之后：Session 与后台任务的恢复
+## 11.7 调活之后：Session 与后台任务的恢复
 
 服务被重新拉起后，"跑一半"的工作靠**数据库里的 durable 状态**接上，不依赖任何内存：
 
@@ -206,12 +206,12 @@ TUI 里跑的持久终端（`/api/persistent-pty/*`）属于 daemon，但 daemon
    下次扫描计入，预算无法被规避）；超预算 → 发布 `Execution.Failed(RESUME_EXHAUSTED)` 并释放
 3. 预算内 → 注入 synthetic 消息 *"Continuing after restart"*（`metadata.notice: "restart"`），
    然后 `execution.resume(sessionID)` 续跑
-4. **后台任务**（Job，见第 11 课）：
+4. **后台任务**（Job，见第 12 课）：
    - shell：重启时还在 running → 通知 *Command cancelled because the server restarted*
      （`resume: false`，避免复活空闲会话，restart.ts）
    - subagent：子会话还能续则续跑子会话，否则向父会话投递完成/失败通知
 
-## 10.8 配置与运维
+## 11.8 配置与运维
 
 ### service 配置文件（`packages/cli/src/services/service-config.ts`）
 
@@ -239,7 +239,7 @@ opencode --standalone      # 私享 server，隔离共享服务问题
 opencode api get /api/info # 用与服务相同的发现/认证链路发请求（可能顺带拉起服务）
 ```
 
-## 10.9 完整时序：kill -9 daemon 后的下一次 `opencode`
+## 11.9 完整时序：kill -9 daemon 后的下一次 `opencode`
 
 ```
 $ kill -9 <daemon_pid>
@@ -260,7 +260,7 @@ $ opencode                 # 任意客户端启动（TUI 默认 mismatch: "repla
    └─ TUI 连上 endpoint，继续用同一个全局 SQLite 里的全部会话
 ```
 
-## 10.10 小结
+## 11.10 小结
 
 1. **没有守护进程式的自愈**：复活是客户端驱动、懒式发生的（`Service.ensure`）。
 2. **一个文件就是全部契约**：`service.json`（0600）提供 url+pid+version+password；读写全原子。
