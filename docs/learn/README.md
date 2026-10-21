@@ -35,6 +35,7 @@
 | 12 | [`12-background-task-notify.md`](./12-background-task-notify.md) | 后台任务完成通知与自动唤醒 |
 | 附 | [`code-navigation.md`](./code-navigation.md) | V2 代码地图 |
 | 附 | [`code-examples.md`](./code-examples.md) | V2 API / 插件 / 配置示例 |
+| 附 | [`QA.md`](./QA.md) | 学习问答：steer/queue、execution、drain、收件箱与控制项 |
 
 阅读顺序就是编号顺序：**01 → 02 → 03 → 04 → 05 …**。
 前四课先把"一次启动 + 一次对话 + 并发边界 + 核心不变式"跑通；
