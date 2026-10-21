@@ -1,12 +1,12 @@
 # 10. 后台服务生命周期：daemon 死了之后，怎么被"调活"
 
-> 本课回答：**v2 的后台进程（daemon）直接结束后，能被主动调起吗？** 结论：能，但不是它自己复活——
+> 本课回答：**V2 的后台进程（daemon）直接结束后，能被主动调起吗？** 结论：能，但不是它自己复活——
 > opencode 没有 launchd/systemd 级别的守护或外部 watchdog，**复活是懒式的、由下一个客户端启动驱动的**。
 > 任何 `opencode` 命令（TUI / `opencode api` / Desktop / SDK）启动时都会执行一次
 > `Service.ensure`：发现服务不在（或假死/版本不符），就**由客户端进程把服务重新 spawn 出来**，
 > 对用户表现为透明。
 >
-> 承接第 8 课（§8.4 daemon 模型）的进程拓扑；本课深入生命周期的每个环节。
+> 承接第 8 课（§8.5 daemon 模型）的进程拓扑；本课深入生命周期的每个环节。
 
 ## 10.1 一张图：谁发现谁、谁拉起谁
 
@@ -36,9 +36,9 @@
 complete discovery contract — reading it is all a client needs to connect"）：
 
 - 路径：`$XDG_STATE_HOME/opencode/service.json`，默认 `~/.local/state/opencode/service.json`
-  （`packages/client/src/service-probe.ts:39` `fallback()`）
+  （`packages/client/src/service-probe.ts` `fallback()`）
 - 权限：`0600`
-- 内容（`Service.Info` Schema，`packages/client/src/effect/service.ts:142`）：
+- 内容（`Service.Info` Schema，`packages/client/src/effect/service.ts`）：
 
 ```json
 {
@@ -51,14 +51,14 @@ complete discovery contract — reading it is all a client needs to connect"）�
 ```
 
 客户端**只靠这个文件**就能连接：url + 文件里的 password 组成 Basic Auth（`headers()`，
-`service-probe.ts:93`）。密码不在环境变量、不传命令行，避免泄漏给工具子进程。
+`service-probe.ts`）。密码不在环境变量、不传命令行，避免泄漏给工具子进程。
 
 ### 写入与自愈（谁负责这个文件）
 
 | 场景 | 行为 |
 |---|---|
-| daemon 启动监听后 | 原子写入（tmp + rename），`ServiceRegistration.register`（`packages/cli/src/services/service-registration.ts:13`） |
-| daemon 优雅退出 | scope finalizer 里检查"仍拥有注册"则删除文件（self-evict，`service-registration.ts:67-70`） |
+| daemon 启动监听后 | 原子写入（tmp + rename），`ServiceRegistration.register`（`packages/cli/src/services/service-registration.ts`） |
+| daemon 优雅退出 | scope finalizer 里检查"仍拥有注册"则删除文件（self-evict，`service-registration.ts`） |
 | daemon 被 SIGKILL | 文件残留（stale），由客户端探测失败兜底（见 10.3） |
 | 文件被别的实例覆盖 | 注册后 fork 的自检 fiber 每 5s 回读文件，五个字段不再全等（`owns()` 失败）→ 记日志并主动 shutdown |
 
@@ -66,7 +66,7 @@ complete discovery contract — reading it is all a client needs to connect"）�
 
 ### 10.3.1 入口分发
 
-`packages/cli/src/services/server-connection.ts:21` `resolve()`：
+`packages/cli/src/services/server-connection.ts` `resolve()`：
 
 | 启动参数 | 行为 |
 |---|---|
@@ -74,11 +74,12 @@ complete discovery contract — reading it is all a client needs to connect"）�
 | `--standalone` 或 `service.disabled=true` | 起私享 server（`Standalone.start()`），不进共享 daemon |
 | 默认 | `resolveManaged` → `Service.ensure`（托管模式，本课主角） |
 
-版本不匹配策略 `--mismatch replace|ignore|error`：`replace` 直接 ensure 替换；
-`ignore` 忽略版本差异复用；`error` 先 discover 兼容版，发现仅版本不符的在位者则报错
-（`resolveManaged`，server-connection.ts:74-84）。
+版本不匹配策略由调用方决定（没有 `--mismatch` 用户 flag）：TUI 默认 `replace`，
+`api` 用 `ignore`，其它命令按 `resolve` 的默认值；`error` 只在库内部使用。
+`replace` 直接 ensure 替换；`ignore` 忽略版本差异复用；`error` 先 discover 兼容版，
+发现仅版本不符的在位者则报错（`resolveManaged`，server-connection.ts）。
 
-### 10.3.2 ensure 主循环（`packages/client/src/effect/service.ts:49`）
+### 10.3.2 ensure 主循环（`packages/client/src/effect/service.ts`）
 
 ```
 ensure():
@@ -89,7 +90,7 @@ ensure():
        - 200 + ok       → state: "ready"
        - 500            → state: "failed"
        - 其他/超时       → state: "waiting" / timedOut
-    2. decide(service)（service-probe.ts:22）：
+    2. decide(service)（service-probe.ts）：
        - reuse   → PtyHandoff.complete → 返回 endpoint ✔
        - replace → onStart("version-mismatch") → stop() → 踢掉旧 pid
        - wait    → 继续轮询（新进程还在启动）
@@ -100,7 +101,7 @@ ensure():
          清 PTY handoff → terminate(旧 pid) → evict → 立即 recruit
 ```
 
-### 10.3.3 关键参数（`packages/client/src/service-timing.ts:16`）
+### 10.3.3 关键参数（`packages/client/src/service-timing.ts`）
 
 | 参数 | 值 | 含义 |
 |---|---|---|
@@ -113,7 +114,7 @@ ensure():
 
 ### 10.3.4 contender：spawn 出来的"竞争者"
 
-`packages/client/src/service-contender.ts:14`：
+`packages/client/src/service-contender.ts`：
 
 ```ts
 const child = spawn(command, args, {
@@ -126,54 +127,61 @@ child.unref()            // 从客户端事件循环摘除
 ```
 
 - 命令默认 `["opencode", "serve", "--service"]`，由 CLI 的 `ServiceConfig.options()` 注入
-  （`packages/cli/src/services/service-config.ts:115`，`selfCommand()` 保证 spawn 的是当前二进制）
+  （`packages/cli/src/services/service-config.ts`，`selfCommand()` 保证 spawn 的是当前二进制）
 - `contenderPool`：**最多保留 2 个尝试**；有服务回答就重置退避；尝试干净退出（说明别人赢了）
   则退避翻倍（5s→30s）；收集第一个失败用于最终报错（带 stderr 尾部）
 - 竞争是特性不是 bug：多个客户端同时发现服务死了会各自 spawn，由服务端仲裁收敛（见 10.4）
 
 ## 10.4 服务端：注册即仲裁（first-writer-wins）
 
-`opencode serve --service` 启动后（`packages/cli/src/server-process.ts:46` `processEffect`）：
+`opencode serve --service` 启动后（`packages/cli/src/server-process.ts` `processEffect`）：
 
 1. **在位者检查**：配置了固定端口时先 `Service.incumbent` 探测同 URL——已有协议兼容的服务
-   在位（含正在启动）就**静默退出**（server-process.ts:72）
+   在位（含正在启动）就**静默退出**（server-process.ts）
 2. 起 HTTP server（默认 hostname 127.0.0.1；端口：channel 默认值见 10.8）
 3. `onListen` 回调：密码未持久化则先写入 service 配置（`ServiceConfig.password`，跨重启复用，
-   `service-config.ts:147`），然后 `ServiceRegistration.register`：
+   `service-config.ts`），然后 `ServiceRegistration.register`：
    - tmp + rename 原子写注册文件（`0600`）
    - **fork 一个 5 秒周期的自检 fiber**：回读注册文件，`owns(found)`（五个字段全等）才继续；
      读失败或被别人覆盖 → 记日志 `managed service registration replaced; shutting down` 并
-     **主动 shutdown**（`service-registration.ts:39-66`）
+     **主动 shutdown**（`service-registration.ts`）
 4. 端口被占的兜底：`addressInUse` 时等在位者最多 15s（可能正在启动），仍拿不到就报错并提示
-   `opencode service set port`（server-process.ts:153-173）
+   `opencode service set port`（server-process.ts）
 
 **仲裁语义**：多个 contender 写同一个文件，只有一个能"拥有"它；输家读到别人的 id 就自杀。
 客户端 ensure 轮询注册文件 + 探活，最终只会有一个 daemon 存活并被所有人复用。
 
-## 10.5 停止与替换：信号升级 + PTY 移交
+## 10.5 停止与替换：信号升级与 PTY 策略
 
-`Service.stop`（`packages/client/src/effect/service.ts:130`）：
+`Service.stop`（`packages/client/src/effect/service.ts`）：
 
 ```
 stop({ pty: "clear" | "handoff" }):
   1. pty === "handoff" → PtyHandoff.prepare（为持久终端准备移交，best-effort）
+     pty === "clear"   → PtyHandoff.clear（明确不保留）
   2. 读注册 → SIGTERM 旧 pid
   3. 每 50ms 轮询 process.kill(pid, 0)，最多 ~5s
   4. 还活着 → SIGKILL → 再轮询确认
   5. 注册文件仍描述这个 pid → 删除文件
 ```
 
+**两种策略要分清**：
+
+- 版本不匹配导致的自动替换：`handoff`，尽量保住终端；
+- 用户显式 `opencode service stop/restart`：先 `shutdownPersistentPty`，
+  再 `stop`，也就是**终端会结束**。`restart` 不是"无损重启"。
+
 `terminate` 的比较基准是 **pid 本身**而不是注册文件：注册可能在信号发出前后易手/消失，
-只有被 signalled 的进程能说明自己是否已停（`service.ts:182-197` 注释）。
+只有被 signalled 的进程能说明自己是否已停（`service.ts` 注释）。
 
 ## 10.6 PTY handoff：持久终端跨 daemon 重启
 
-TUI 里跑的持久终端（`/pty`）属于 daemon，但 daemon 被替换时不应杀掉用户的长跑终端：
+TUI 里跑的持久终端（`/api/persistent-pty/*`）属于 daemon，但 daemon 被替换时不应杀掉用户的长跑终端：
 
 - 停旧服务前 `PtyHandoff.prepare(file, info, timeout)` 把终端状态序列化；
 - 新 contender spawn 时，客户端把 handoff 注入环境变量 `OPENCODE_PTY_HANDOFF`
-  （`packages/client/src/pty-handoff.ts:77`）；
-- 新 daemon 启动第一件事就消费并**删除**该环境变量（`server-process.ts:47-58`，避免泄漏给工具子进程），
+  （`packages/client/src/pty-handoff.ts`）；
+- 新 daemon 启动第一件事就消费并**删除**该环境变量（`server-process.ts`，避免泄漏给工具子进程），
   解码失败则降级为"终端从头开始"并记警告；
 - 复用成功时 `PtyHandoff.complete`，服务假死被强杀时 `PtyHandoff.clear`（终端保不住要明说）。
 
@@ -181,7 +189,7 @@ TUI 里跑的持久终端（`/pty`）属于 daemon，但 daemon 被替换时不�
 
 服务被重新拉起后，"跑一半"的工作靠**数据库里的 durable 状态**接上，不依赖任何内存：
 
-### write-ahead claim（`packages/core/src/session/execution.ts:81`）
+### write-ahead claim（`packages/core/src/session/execution.ts`）
 
 - drain 开始：`session.execution.started` 事件与 `SessionStore.claim`（把
   `session.time_suspended` 写入 SQLite）**同一事务**提交——先记账再干活
@@ -193,14 +201,14 @@ TUI 里跑的持久终端（`/pty`）属于 daemon，但 daemon 被替换时不�
 
 托管 server 启动时调用（嵌入方也可自己触发）：
 
-1. `store.listSuspended()`：列出所有带 claim 的**顶层** Session（`store.ts:194`）
+1. `store.listSuspended()`：列出所有带 claim 的**顶层** Session（`store.ts`）
 2. 对每个：`prepareResume` → `countResume` 记账一次恢复尝试（**先持久化再恢复**，崩溃也被
    下次扫描计入，预算无法被规避）；超预算 → 发布 `Execution.Failed(RESUME_EXHAUSTED)` 并释放
 3. 预算内 → 注入 synthetic 消息 *"Continuing after restart"*（`metadata.notice: "restart"`），
    然后 `execution.resume(sessionID)` 续跑
 4. **后台任务**（Job，见第 11 课）：
    - shell：重启时还在 running → 通知 *Command cancelled because the server restarted*
-     （`resume: false`，避免复活空闲会话，restart.ts:101-136）
+     （`resume: false`，避免复活空闲会话，restart.ts）
    - subagent：子会话还能续则续跑子会话，否则向父会话投递完成/失败通知
 
 ## 10.8 配置与运维
@@ -211,7 +219,7 @@ TUI 里跑的持久终端（`/pty`）属于 daemon，但 daemon 被替换时不�
 password / cors / env` 七个键；`opencode service get/set/unset <key>` 读写（改端口等会先
 stop 服务）。
 
-### channel 决定注册文件名与默认端口（`service-config.ts:32-41`）
+### channel 决定注册文件名与默认端口（`service-config.ts`）
 
 | channel | 注册文件 | 默认端口 |
 |---|---|---|
@@ -224,9 +232,9 @@ dev worktree 与正式安装共存互不干扰的机制基础（对齐根 AGENTS
 ### 常用命令
 
 ```sh
-opencode service status    # 读注册 + 探活，报告健康/版本
-opencode service restart   # stop（PTY handoff）+ ensure 重新拉起
-opencode service stop      # SIGTERM→SIGKILL 升级 + 清注册
+opencode service status    # 读注册 + 探活
+opencode service restart   # shutdownPersistentPty → stop → ensure（终端会结束）
+opencode service stop      # shutdownPersistentPty → SIGTERM→SIGKILL → 清注册
 opencode --standalone      # 私享 server，隔离共享服务问题
 opencode api get /api/info # 用与服务相同的发现/认证链路发请求（可能顺带拉起服务）
 ```

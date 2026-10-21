@@ -1,452 +1,308 @@
-# 3. UI 接入层：CLI、TUI、HTTP Server
+# 03. UI 接入层：CLI、TUI、HTTP Server 与 Client
 
-## 3.1 架构概览
-
-opencode 有三条主要 UI/接入路径，其中 CLI 和 TUI 直接与内核通信（进程内调用），Web/Desktop/外部集成通过 HTTP API Server：
-
-```
-                     ┌──────────────────────────────┐
-                     │        用户交互入口           │
-                     └──────────────┬───────────────┘
-                                    │
-              ┌─────────────────────┼─────────────────────┐
-              ▼                     ▼                     ▼
-    ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐
-    │   CLI (非交互)    │  │  TUI (交互式终端) │  │  Web/Desktop     │
-    │  opencode run     │  │  opencode tui     │  │  opencode web    │
-    └────────┬─────────┘  └────────┬─────────┘  └────────┬─────────┘
-             │                     │                     │
-             │ 进程内调用          │ Worker Thread + RPC  │  HTTP
-             │                     │                     │
-             ▼                     ▼                     ▼
-    ┌──────────────────┐  ┌──────────────────────────────────────┐
-    │   opencode 内核   │  │           HTTP API Server            │
-    │   (直接调用)      │  │        (packages/server)             │
-    │  SessionPrompt    │  │  /session, /message, /agent, /model, │
-    │  .loop()         │  │  /provider, /skill, /event,          │
-    └────────┬─────────┘  │  /permission, /command, /question,    │
-             │            │  /reference, /fs, /pty, /health       │
-             │            └──────────────────┬───────────────────┘
-             │                               │
-             └───────────────┬───────────────┘
-                             ▼
-                    ┌──────────────────┐
-                    │  opencode 内核   │
-                    │  (packages/     │
-                    │   opencode)      │
-                    └─────────────────┘
-```
-
-### 核心文件
-
-| 文件 | 职责 |
-|------|------|
-| `packages/cli/src/index.ts` | CLI 入口 boot 文件 |
-| `packages/opencode/src/cli/cmd/run.ts` | `opencode run` 命令（非交互 + 交互式） |
-| `packages/opencode/src/cli/cmd/tui.ts` | `opencode tui` 命令（TUI 启动） |
-| `packages/opencode/src/cli/cmd/run/tool.ts` | CLI 工具输出渲染（1489行核心渲染逻辑） |
-| `packages/tui/src/app.tsx` | TUI 主应用入口（React/Ink） |
-| `packages/server/src/api.ts` | HTTP API 定义（Effect HttpApi） |
-| `packages/server/src/routes.ts` | HTTP 路由表 |
-| `packages/sdk/js/` | JavaScript SDK（外部集成接口） |
+> 本课回答：V2 的界面层怎么分层？TUI 和 server 是同一进程吗？`opencode run` 走什么链路？
+> Web / Desktop 如何复用同一套协议？
+>
+> V1 的"Bun Worker + 进程内 RPC + 假 URL `http://opencode.internal`"已经不存在；
+> 现在 TUI 是一个普通客户端，连接 daemon、standalone server 或远端 URL。
 
 ---
 
-## 3.2 CLI 命令模式
-
-### 3.2.1 命令注册
-
-CLI 使用 `yargs` 框架，通过 `packages/opencode/src/cli/cmd/cmd.ts` 的 `cmd()` 函数注册命令。
-
-主要命令：
-- `opencode run [prompt]` — 发送 prompt 并流式输出
-- `opencode tui [project]` — 启动交互式终端 UI
-- `opencode serve` — 启动 HTTP API 服务器
-- `opencode agent`、`session`、`models`、`providers` 等管理命令
-
-### 3.2.2 `opencode run` 三种模式
-
-`packages/opencode/src/cli/cmd/run.ts`：
+## 3.1 一张图
 
 ```
-opencode run "hello"
-  │
-  ├─ 非交互模式 (默认)
-  │  ├─ 发送 prompt → 创建/恢复 session
-  │  ├─ 调用 SessionPrompt.loop()
-  │  └─ 流式输出 LLM 事件到 stdout，session idle 后退出
-  │
-  ├─ 交互式本地 (--interactive)
-  │  ├─ 启动内嵌 HTTP server
-  │  └─ 使用 split-footer 直接模式 (无外部 HTTP)
-  │
-  └─ 交互式 attach (--interactive --attach)
-     ├─ 连接到运行中的 opencode server
-     └─ 通过 SDK Client 交互
+┌─ 客户端进程（可多个）──────────────────────────────┐
+│  @opencode/cli  ── 命令解析 / 非交互 run / TUI 宿主 │
+│      └─ @opencode/tui  Solid + @opentui 渲染        │
+│      └─ @opencode/client  协议客户端 + 数据仓库      │
+│  @opencode/app（Web） / @opencode/desktop（Electron）│
+└──────────────────────────┬──────────────────────────┘
+                           │ HTTP JSON + SSE（/api/*）
+                           ▼
+┌─ Server 进程（daemon / standalone / 远端）──────────┐
+│  @opencode/server                                   │
+│   · Effect HttpApi 路由 + 认证 + CORS               │
+│   · Core 服务图（Database/Bus/Session/Tool/…）      │
+│   · Location 按目录懒加载                            │
+│   · 事件持久化 + SSE 扇出                            │
+└─────────────────────────────────────────────────────┘
 ```
 
-CLI 输出渲染在 `packages/opencode/src/cli/cmd/run/tool.ts`（1489行）中处理，包括：
-- 工具调用图标和标题
-- 工具输出截断
-- 代码 diff 高亮
-- 文件操作展示
-- 子代理进度
-
-### 3.2.3 交互式输入
-
-`packages/opencode/src/cli/cmd/run/runtime.stdin.ts`：
-- 支持管道输入（`echo "..." | opencode run`）
-- 支持 stdin 交互（TTY 模式）
-- 解析 interactive stdin 指令
+**核心不变式：客户端不执行工具、不调用模型。**
+客户端只做三件事：组装请求、消费事件、保存本地偏好/历史。
 
 ---
 
-## 3.3 TUI 终端界面
+## 3.2 CLI
 
-### 3.3.1 启动流程
+### 3.2.1 入口
 
-`packages/opencode/src/cli/cmd/tui.ts`：
+`packages/cli/src/index.ts`：
 
-```
-opencode tui
-  │
-  ├─ 1. 解析参数（project, model, continue, session, fork, prompt 等）
-  ├─ 2. resolveThreadDirectory() 确定工作目录
-  ├─ 3. 启动 Worker Thread：
-  │     └─ new Worker(target()) → 运行 tui/worker.ts
-  ├─ 4. 通过 RPC 与 Worker Thread 通信：
-  │     ├─ createWorkerFetch() — 代理 fetch 请求
-  │     └─ createEventSource() — 代理事件订阅
-  └─ 5. 加载 TUI UI 组件（packages/tui/）
-```
+1. `ensurePluginRuntime()`
+2. 注册所有命令（`commands/commands.ts` 的 `Spec.make` 树）
+3. `Runtime.run(Commands, Handlers, { version })`
+4. 统一提供 `Global`、`AppProcess`、`Npm`、`EffectFlock`、`Observability`、Node 服务
 
-### 3.3.2 Worker Thread 架构
+命令通过 **Effect 的 `unstable/cli`** 定义，不是 yargs。
+Handler 按需动态 import（`commands/handlers/*`），保持启动轻量。
 
-主线程（TUI UI）通过 RPC 与 Worker Thread 通信：
+### 3.2.2 命令面
 
-```
-┌─ Main Thread ────────────────────┐    ┌─ Worker Thread ───────────────┐
-│                                  │    │                               │
-│  React/Ink 组件                  │    │  opencode 内核                │
-│  ├─ App 组件                     │    │  ├─ SessionPrompt.loop()      │
-│  ├─ 聊天界面                     │    │  ├─ Plugin 管理               │
-│  ├─ 输入框                       │ RPC│  └─ HTTP Server               │
-│  ├─ 工具输出展示                 │◀──▶│                               │
-│  └─ 权限确认对话框               │    │  Worker 暴露的方法：          │
-│                                  │    │  ├─ fetch(url, opts)          │
-│  createWorkerFetch()             │    │  ├─ global.event → 事件推送   │
-│  createEventSource()             │    │  └─ 其他 opencode API         │
-│                                  │    │                               │
-└──────────────────────────────────┘    └───────────────────────────────┘
-```
+| 命令 | 作用 |
+|---|---|
+| `opencode [directory]` | 默认命令：启动 TUI |
+| `opencode run ...` | 非交互执行，流式输出到 stdout |
+| `opencode serve` | 起 V2 API + Web 静态资源；`--service` 为托管 daemon，`--stdio` 为嵌入模式 |
+| `opencode service ...` | 后台服务 start/restart/status/stop/get/set/unset |
+| `opencode api ...` | 按 OpenAPI operation 或 `METHOD path` 调运行中的 server |
+| `opencode mini` | 最小交互界面 |
+| `opencode acp` | Agent Client Protocol server |
+| `opencode auth/mcp/plugin/models/session/stats/pair/reload/upgrade ...` | 管理与诊断 |
 
-### 3.3.3 TUI 组件架构
+`--server <url>` 直连显式 server；`--standalone` 起私享 server；默认走
+`Service.ensure` 发现/拉起共享 daemon（第 10 课）。
 
-`packages/tui/src/`：
+### 3.2.3 `opencode run` 的链路
+
+`commands/handlers/run.ts` → `run/run.ts` → `run/noninteractive.ts`：
 
 ```
-app.tsx                    # 主应用入口
-├── context/               # React Contexts
-│   ├── event.ts           # 全局事件流
-│   ├── thinking.ts        # 思考状态
-│   ├── directory.ts       # 当前目录
-│   └── editor.ts          # 编辑器集成
-├── component/             # UI 组件
-│   ├── bg-pulse-render.ts # 背景脉冲动画
-│   └── prompt/            # Prompt 相关组件
-│       ├── local-attachment.ts  # 文件附件
-│       └── cwd.ts         # 当前目录显示
-├── prompt/                # Prompt 渲染
-│   ├── traits.ts          # 特性处理
-│   ├── part.ts            # Part 渲染
-│   └── display.ts         # 显示逻辑
-├── routes/                # 路由
-├── util/                  # 工具函数
-│   ├── tool-display.ts    # 工具输出展示
-│   ├── transcript.ts      # 对话转录
-│   ├── renderer.ts        # Markdown 渲染
-│   ├── revert-diff.ts     # 回退 diff
-│   ├── collapse-tool-output.ts  # 折叠工具输出
-│   └── ...
-├── theme/                 # 主题系统
-├── plugin/                # TUI 插件集成
-│   ├── api.ts
-│   └── command-shim.ts
-├── feature-plugins/       # 功能插件
-│   ├── builtins.ts
-│   └── system/
-├── keymap.tsx             # 键盘绑定
-├── clipboard.ts           # 剪贴板
-├── audio.ts               # 音频
-└── editor.ts              # 编辑器集成
+ServerConnection.resolve()            得到 endpoint
+  → OpenCode.make({ baseUrl, headers })   packages/client/promise
+  → resolveSessionTarget()                --continue / --session / --fork
+  → client.event.subscribe()              先收到 server.connected 才算连上
+  → client.session.prompt({ sessionID, text, files, agent, model, delivery })
+  → 消费事件直到 session.execution.succeeded/interrupted/failed
 ```
 
-### 3.3.4 TUI 功能特性
+非交互模式会：
 
-- **React/Ink** 渲染，终端原生体验
-- 实时流式文本显示（Markdown 渲染）
-- 工具调用的分块/折叠展示
-- 权限确认对话框
-- 会话历史滚动回溯
-- 主题系统（支持自定义颜色）
-- 键盘快捷键绑定
-- 文件 diff 展示
-- 子代理进度跟踪
-- 音频提示
-
-### 3.3.5 终端面板与持久 PTY（`/terminal` 的"丢失"与恢复）
-
-**现象**：在 TUI 里重复执行 `/terminal`，之前打开的终端从画面上"消失"了，
-但里面跑的任务（如 dev server）仍在正常执行。
-
-**本质**：v2 TUI 的终端是**服务端持久 PTY**，不是 TUI 本地进程：
-
-- 每个终端 = server 端一个 persistent PTY（`client.api.experimental.persistentPty.create/list`），
-  TUI 只是 attach 上去做渲染；
-- 切换/隐藏终端面板只是改"当前选中显示哪一个"（`selectTerminal(sessionID, ptyID)`），
-  **PTY 进程不死**，任务继续跑；
-- PTY 列表和选中项都持久化：列表由 server 持有（TUI 重启/断连后
-  `server.connected` 时自动 refresh 恢复），选中项存在 TUI 本地存储
-  key `session-terminal-selection`。
-
-**关键：两个入口语义完全不同**（源码 + v2.0.24 release 二进制双重确认）：
-
-| 入口 | keybind | 行为 |
-|------|---------|------|
-| `/terminal`（slash，`session.terminal`） | 命令面板 | **无条件新建**一个 PTY 并切过去 |
-| 显示/隐藏终端面板（`terminal.toggle`） | `<leader>t` | 面板可见时隐藏；隐藏时显示并选中列表**最后一个**（`at(-1)`），列表为空才新建 |
-| 选择终端（`terminal.select`） | `<leader>down` | 弹出 composer 的 **Terminals 列表**：该 session 的全部持久 PTY |
-| 关闭终端面板（`terminal.close`） | `<leader>up` | 只关面板（deselect），**不杀 PTY** |
-
-所以"重复执行 `/terminal` 导致旧终端丢失"是设计使然：斜杠命令的语义就是
-"New terminal"，每次都新建并把选中切过去，旧终端只是不再被显示。
-
-**恢复旧终端**：
-
-1. 按 `<leader>down`（或命令面板 "Select terminal"）；
-2. composer 弹出 Terminals 列表，每行显示该终端的**当前前台进程名**
-   （`foregroundProcess ?? title`）——还在跑的任务会直接显示进程名，一眼可辨；
-3. `up/k`、`down/j` 移动（`composer.terminal.up/down`），**Enter** 选中
-   （`composer.terminal.select`），鼠标悬停 + 点击同样有效。
-
-**注意**：
-
-- toggle 永远跳到最新创建的那个，建了多个终端后想回旧的，一律走
-  `<leader>down` 列表挑选；
-- 想真正结束某个终端里的任务：切回那个终端 Ctrl+C / `exit`；删除会话或
-  显式调删除接口才会移除 PTY（对应 `persistent-pty.removed` 事件）。
-
-**核心文件**：
-
-| 文件 | 职责 |
-|------|------|
-| `packages/tui/src/context/session-terminals.tsx` | 终端列表/选中状态管理、`newTerminal()`、持久 PTY 事件刷新 |
-| `packages/tui/src/routes/session/composer/terminals-tab.tsx` | composer 的 Terminals 列表 UI（up/down/select 键层） |
-| `packages/tui/src/component/session-frame.tsx` | `terminal.toggle/select/close` 命令注册 |
+- 把 `--file` 读成 `data:` URL（限制 10 MiB）；
+- 用 `--auto` 自动允许未显式拒绝的权限；
+- 遇到 `permission.asked` / `form.created` 自动拒绝/取消，并把原因反馈给模型；
+- `--format json` 输出逐行 JSON 事件，否则用 `run/ui.ts` 渲染。
 
 ---
 
-## 3.4 HTTP API Server
+## 3.3 TUI
 
-### 3.4.1 API 架构
+### 3.3.1 技术栈
 
-`packages/server/src/api.ts` 使用 Effect `HttpApi` 定义 REST API：
+- 渲染：`@opentui/solid`（SolidJS + 原生终端渲染器），**不是 React/Ink**；
+- 入口：`packages/tui/src/app.tsx` 的 `run(input)`；
+- 宿主：`packages/cli/src/commands/handlers/default.ts` 调用 `run()`，
+  传入 endpoint、`Config`（`cli.json`）、更新器、包管理器等能力。
 
-```ts
-// 路由组
-agent      → /api/agent/*
-session    → /api/session/*
-message    → /api/message/*
-model      → /api/model/*
-provider   → /api/provider/*
-skill      → /api/skill/*
-event      → /api/event/*
-permission → /api/permission/*
-command    → /api/command/*
-question   → /api/question/*
-reference  → /api/reference/*
-fs         → /api/fs/*
-pty        → /api/pty/*
-health     → /api/health
-location   → /api/location
+`run()` 做：
+
+1. 解析 `cli.json`（客户端偏好）
+2. `OpenCode.make({ baseUrl, headers })` 建客户端
+3. 通过 `file.list` / `location.get` 解析当前 Location
+4. 创建 `@opentui/core` renderer（60fps、鼠标、Kitty keyboard）
+5. 挂 Provider 树：Log → Exit → App → Paths → Storage → Args → Config →
+   Keymap → Toast → Route → Client → Data → Local → Permission → Plugin …
+6. 进入初始路由（Home 或 Session）
+
+### 3.3.2 数据层
+
+`packages/tui/src/app.tsx` 的 `DataProvider` 包装
+`packages/client/src/solid/data.ts` 的 `createData()`：
+
+```
+createData({ api, event, connection, directory })
+  ├─ store.session.info/message/pending/permission/form
+  ├─ store.location / config / provider / model / agent / skill / command
+  ├─ event 归并（session.* / permission.* / form.* / mcp.* / …）
+  └─ 乐观提交（prompt / synthetic / command）+ 回滚
 ```
 
-### 3.4.2 Server 启动
+`prompt()` 的乐观准入：
 
-`packages/opencode/src/server/server.ts`：
-- 内嵌 HTTP server（基于 Hono? 或自定义）
-- 支持 Unix socket 和 TCP 端口
-- 自动选择可用端口
-- 认证中间件
+1. 同步插入一条本地 pending 行（立即可见）；
+2. 提交 HTTP；
+3. 若失败，回滚该行并恢复输入；若成功，等待 `session.inbox.enqueued` /
+   `session.inbox.delivered` 事件把它替换为真实消息。
 
-### 3.4.3 关键 API 端点
+因此提交不等待网络，界面不会"卡一下"。
 
-**Session API** (`/api/session`)：
-- `POST /api/session` — 创建 session
-- `GET /api/session/:id` — 获取 session
-- `POST /api/session/:id/prompt` — 发送 prompt
-- `POST /api/session/:id/cancel` — 取消运行
+### 3.3.3 事件流
 
-**Message API** (`/api/message`)：
-- `GET /api/session/:id/messages` — 获取消息列表
-- 支持分页
+`packages/client/src/solid/connection.ts`：
 
-**Event API** (`/api/event`)：
-- SSE (Server-Sent Events) 实时事件流
-- 事件类型包括：`text.delta`、`tool.call`、`tool.result`、`step.finish` 等
+```
+api.event.subscribe()                  GET /api/event (SSE)
+  → 第一帧必须是 server.connected
+  → 事件先入队，默认 10ms 批量 flush（Solid batch）
+  → 空闲看门狗 45s（服务端每 15s 发 keepalive）
+  → 断线 1s 退避重连；页面前后台切换会主动检查半开连接
+```
 
-**File System API** (`/api/fs`)：
-- 文件读写、目录浏览
+TUI 的 `context/client.tsx` 把事件分发到 `createGlobalEmitter`，
+`context/data.tsx` 与各 Provider 订阅自己关心的事件类型。
 
-**PTY API** (`/api/pty`)：
-- 伪终端管理
+### 3.3.4 渲染
 
-### 3.4.4 中间件
+- 会话列表与消息在 `packages/session-ui/src/`（message、tools、timeline、pierre diff…）；
+- TUI 路由在 `packages/tui/src/routes/session/`；
+- `text/reasoning` 的 delta 事件直接追加到本地 part，形成打字机效果；
+- `session.execution.*` 驱动 footer 状态（busy/retry/idle）；
+- `permission.asked` / `form.created` 渲染为对话框，回复走对应 API。
 
-`packages/server/src/middleware/`：
-- `authorization.ts` — Token 认证
-- `schema-error.ts` — Schema 错误处理
-- `session-location.ts` — Session 位置解析
+### 3.3.5 持久终端
+
+终端不是 TUI 本地进程，而是 **server 持有的 persistent PTY**：
+
+| 入口 | 行为 |
+|---|---|
+| `/terminal`（`session.terminal`） | 无条件新建 PTY 并选中 |
+| `terminal.toggle`（`<leader>t`） | 面板可见则隐藏；隐藏则选最后一个，列表为空才新建 |
+| `terminal.select`（`<leader>down`） | 打开该 session 的 Terminals 列表 |
+| `terminal.close`（`<leader>up`） | 只关面板，不杀 PTY |
+
+- 列表由 server 持有；TUI 在 `server.connected` 时刷新；
+- 选中项存在客户端存储 `session-terminal-selection`；
+- 新建/删除通过 `experimental.persistentPty.create/list/...`；
+- 删除 session 或显式删除 PTY 才会真正结束进程。
+
+核心文件：`tui/src/context/session-terminals.tsx`、
+`tui/src/routes/session/composer/terminals-tab.tsx`、
+`tui/src/component/session-frame.tsx`。
 
 ---
 
-## 3.5 JavaScript SDK
+## 3.4 HTTP Server
 
-### 3.5.1 SDK 生成
+### 3.4.1 启动
 
-`packages/sdk/js/script/build.ts` — 生成 TypeScript SDK
+`opencode serve` → `cli/src/server-process.ts`：
 
-```bash
-./packages/sdk/js/script/build.ts
+```
+options（mode = default | service | stdio）
+  → 解析 hostname/port/password/CORS/database/models/config
+  → import("@opencode/server/process").start(...)
+      → packages/server/src/process.ts
+          ├─ node:http createServer
+          ├─ NodeHttpServer.make
+          ├─ createRoutes(options)
+          │    ├─ LayerNode 构建 Core 服务图
+          │    ├─ HttpApiBuilder.layer(Api)
+          │    └─ 中间件：authorization / schema-error / location / session-location / CORS
+          ├─ /api/info（启动中就返回 503 + retry-after）
+          └─ lifecycle.onListen（服务模式注册 service.json）
 ```
 
-### 3.5.2 SDK 使用
+默认端口：服务模式按 channel（49374 / 49375 / hash），前台默认从 4096 起找空位。
+`/api/info` 不需要完整应用就绪，客户端用它探活与判断版本。
 
-```ts
-import { createOpencodeClient } from "@opencode-ai/sdk"
+### 3.4.2 协议
 
-const client = createOpencodeClient({
-  baseUrl: "http://localhost:4096",
-  directory: "/path/to/project",
-})
+`packages/protocol/src/api.ts` 组合的 group：
 
-// Session 操作
-const session = await client.session.create({})
-await client.session.prompt(session.id, {
-  parts: [{ type: "text", text: "hello" }],
-  agent: "general",
-})
+```
+server / debug / migration / worktree / generate / persistent-pty / credential
+agent / plugin / model / provider / integration / websearch / mcp / project
+fs / command / skill / rpc / shell / reference / vcs / config
+session / message / permission / form / pty / location / event
+```
 
-// 订阅事件
-client.event.subscribe((event) => {
-  console.log(event.type, event.data)
-})
+常用端点：
 
-// 工具执行
-const result = await client.session.shell(session.id, {
-  command: "ls -la",
-  agent: "general",
-})
+| 端点 | 用途 |
+|---|---|
+| `GET /api/info` | 版本、pid、urls、tmp 路径 |
+| `POST /api/session` | 创建会话 |
+| `GET /api/session/:id` | 会话信息 |
+| `POST /api/session/:id/prompt` | 准入一条用户输入 |
+| `POST /api/session/:id/interrupt` | 中断当前执行 |
+| `GET /api/session/:id/inbox` | 未消费输入 |
+| `PATCH /api/session/:id/inbox/:inboxID` | steer/queue 切换 |
+| `GET /api/session/:id/message/:messageID` | 单条消息 |
+| `GET /api/event` | 全局 SSE |
+| `GET /api/experimental/session/:id/log` | durable 事件重放 |
+| `WS /api/pty/...`、`/api/persistent-pty/...` | 终端流 |
+
+中间件：
+
+- `authorization`：Basic Auth（`opencode` + service password）；
+- `schema-error`：把 Schema 解码失败变成 400；
+- `location`：从 `location[directory]` 查询参数或
+  `x-opencode-directory` 头解析 Location；
+- `session-location`：从 session ID 反查 Location；
+- CORS：由 `--cors` / service config 控制。
+
+### 3.4.3 错误与就绪
+
+- 启动中：`/api/info` 返回 503 + `retry-after: 1`；
+- 启动失败：503 + `code: service_failed`，提示 `opencode service restart`；
+- 版本不匹配：客户端负责决定复用/重启/报错（第 10 课）。
+
+---
+
+## 3.5 Client 包
+
+`packages/client/src/` 有三个入口：
+
+| 入口 | 用途 |
+|---|---|
+| `promise/` | Promise 风格 `OpenCodeClient`（`opencode run`、CLI 命令） |
+| `effect/` | Effect 风格 API + `Service`（发现/ensure/stop） |
+| `solid/` | Solid store：`createData()`、`createClientConnection()`、PTY 客户端 |
+
+生成代码来自 Protocol/Server HttpApi；**client 不依赖 core/server**。
+`@opencode/sdk-next` 才把三者组合给嵌入式使用。
+
+---
+
+## 3.6 Web / Desktop
+
+- `packages/app`：Vite + Solid Web 应用，复用 `packages/session-ui`；
+- `packages/desktop`：Electron 壳，复用 app 与 client；
+- 二者都通过同一个 HTTP + SSE 协议连接 server，不共享进程内状态；
+- Web 静态资源由 `serve` 的 `WebUi.handler()` 注入（`cli/src/services/web-ui.ts`）。
+
+---
+
+## 3.7 三条数据流
+
+### 3.7.1 TUI 提交
+
+```
+prompt/index.tsx submit
+  → data.session.prompt()      乐观插入 pending 行
+  → client.api.session.prompt() POST /api/session/:id/prompt
+  → server Session.prompt       prepare + inbox admit + wake
+  → 返回 admitted 记录
+  → SSE session.inbox.enqueued / delivered
+  → data store 替换 pending 行
+```
+
+### 3.7.2 CLI 非交互
+
+```
+client.event.subscribe()
+  → session.prompt()
+  → 逐条消费事件：step.started → text/reasoning/tool → step.ended → execution.succeeded
+  → 渲染或 JSON 输出
+```
+
+### 3.7.3 Web/外部
+
+```
+SDK/Client → HTTP → server handler → Core
+Core publish → event 行 + 投影 → PubSub → SSE → client store
 ```
 
 ---
 
-## 3.6 Web UI 组件
+## 3.8 小结
 
-`packages/ui/src/` 提供可复用的 React 组件：
+1. **UI 层只有客户端**：CLI、TUI、Web、Desktop 都通过 HTTP + SSE 连接 server。
+2. **TUI 是普通客户端**：Solid + OpenTUI，不再有 worker/RPC 桥。
+3. **CLI 是 Effect 命令树**：`run` 非交互消费事件，`serve` 起 V2 API。
+4. **数据层乐观提交**：提交不等网络，事件到了再对齐。
+5. **终端属于 server**：persistent PTY 跨 TUI 重启/切换存活。
+6. **协议只有 `/api/*`**：认证、目录、Schema 错误都由中间件统一处理。
 
-```
-components/
-├── message-file.ts          # 文件消息展示
-├── message-part-text.ts     # 文本消息
-├── markdown-stream.ts       # Markdown 流式渲染
-├── markdown-code-state.ts   # 代码块状态
-├── markdown-worker*.ts      # Web Worker Markdown 渲染
-├── apply-patch-file.ts      # Patch 应用
-├── session-diff.ts          # Session diff 展示
-└── scroll-view.test.ts      # 滚动视图
-
-pierre/                      # Code review 组件
-├── file-find.ts             # 文件查找
-├── file-selection.ts        # 文件选择
-├── diff-selection.ts        # Diff 选择
-├── comment-hover.ts         # 注释悬浮
-├── virtualizer.ts           # 虚拟滚动
-└── ...
-
-theme/                       # 主题系统
-├── types.ts                 # 主题类型
-├── color.ts                 # 颜色处理
-├── resolve.ts               # 主题解析
-├── loader.ts                # 主题加载
-└── default-themes.ts        # 默认主题
-
-i18n/                        # 国际化（ar, br, bs, da, de, en, es, fr, ja, ko, no, pl, ru, th, tr, uk, zh, zht）
-
-hooks/                       # React hooks
-
-context/                     # React context
-```
-
----
-
-## 3.7 Desktop App 入口
-
-`packages/app/` 和 `packages/desktop/`：
-- Electron/Tauri 桌面应用
-- 复用 `packages/ui/` 组件
-- 通过 Tauri commands 或 IPC 与内核通信
-
----
-
-## 3.8 完整数据流示例
-
-### 3.8.1 CLI 非交互模式：`opencode run 'fix the bug'`
-
-CLI 非交互模式直接调用内核，不走 HTTP：
-
-```
-1. CLI 解析命令
-   └─ cli/cmd/run.ts
-
-2. 直接调用 opencode 内核
-   └─ session/prompt.ts → SessionPrompt.prompt()
-       ├─ 创建 User 消息
-       └─ 调用 runLoop(sessionID)
-
-3. ReAct 循环
-   └─ session/prompt.ts → loop()
-       ├─ 构建 system prompt + skills
-       ├─ 解析工具 (tool/registry.ts + session/tools.ts)
-       ├─ 触发 chat hooks (plugin/index.ts)
-       ├─ LLM 调用 (session/llm.ts → ai-sdk/native)
-       ├─ 事件处理 (session/processor.ts)
-       │   ├─ text delta → stdout 格式化输出
-       │   ├─ tool call → 执行工具 (tool/*)
-       │   └─ step finish → 结算成本
-       └─ 继续或完成
-```
-
-### 3.8.2 Web/外部集成模式：SDK → HTTP API
-
-Web、Desktop、外部集成通过 HTTP API 与内核通信：
-
-```
-1. SDK Client 调用
-   └─ client.session.prompt(sessionID, { parts: [{ text: "fix the bug" }] })
-
-2. HTTP API Server
-   └─ server/handlers/session.ts → prompt handler
-
-3. opencode 内核
-   └─ session/prompt.ts → SessionPrompt.prompt()
-       ├─ 创建 User 消息
-       └─ 调用 runLoop(sessionID)
-
-4. ReAct 循环
-   └─ ...（同 CLI 模式，但事件通过 SSE 推送到客户端）
-```
-
-### 3.8.3 TUI 模式：Worker Thread + RPC
-
-TUI 主线程通过 Worker Thread RPC 与内核通信（见 3.3.2），不走 HTTP。
+> **迁移小注**：旧文档的 `packages/opencode/src/cli/cmd/tui.ts`、
+> `cli/tui/worker.ts`、`createWorkerFetch`、React/Ink 等描述均已过时。

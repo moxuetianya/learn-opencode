@@ -1,356 +1,418 @@
-# 2. Hook 机制（Plugin SDK）
+# 02. Plugin 与 Hook：V2 扩展机制
 
-## 2.1 架构概览
+> 本课回答：V2 的插件长什么样？有哪些扩展点？Hook 与 Transform 的区别是什么？
+> 多个插件按什么顺序生效？外部插件如何加载和热更新？
+>
+> 旧版 `packages/plugin/src/index.ts` 的 `Hooks` 巨型接口、`Plugin.trigger()` 已重构为
+> **按 domain 分组的 Effect API**；本课只讲现行结构。
 
-opencode 的 Hook 系统基于插件（Plugin）架构，允许外部代码在关键生命周期节点插入自定义逻辑。Hook 通过 `(input, output) => Promise<void>` 的模式实现双向数据传递。
+---
+
+## 2.1 两层插件模型
+
+V2 把"扩展"拆成两种能力，它们都在插件的 Effect scope 内注册，scope 关闭即自动清理：
+
+| 能力 | 形态 | 用途 |
+|---|---|---|
+| **Transform** | `(editor) => void` | 注册/修改长时间存在的注册表（agent、tool、skill、provider、model…） |
+| **Hook** | `(event) => Effect<void>` | 在某个时刻观察/改写一次事件（会话请求、工具调用、权限评估…） |
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│                        opencode 内核                             │
-│                                                                  │
-│  ┌─────────┐   ┌───────────┐   ┌──────────┐   ┌───────────┐   │
-│  │ Prompt  │   │ Processor │   │ Tools    │   │ Agent     │   │
-│  │  Loop   │   │           │   │          │   │           │   │
-│  └────┬────┘   └─────┬─────┘   └────┬─────┘   └─────┬─────┘   │
-│       │              │              │               │          │
-│       └──────────────┼──────────────┼───────────────┘          │
-│                      │              │                           │
-│               Plugin.trigger(name, input, output)               │
-│                      │                                          │
-└──────────────────────┼──────────────────────────────────────────┘
-                       │
-              ┌────────┴────────┐
-              │   Plugin 层      │
-              │  for hook in     │
-              │   hooks:         │
-              │   hook[name]?    │
-              │   (input, output)│
-              └─────────────────┘
+Plugin (Effect)
+  ├─ ctx.agent.transform(...)      改 Agent 注册表
+  ├─ ctx.tool.transform(...)       加工具
+  ├─ ctx.session.hook("context")   改一次模型请求
+  ├─ ctx.tool.hook("execute.before")
+  └─ ctx.event.subscribe()         订阅全局事件流
 ```
 
 ### 核心文件
 
 | 文件 | 职责 |
-|------|------|
-| `packages/plugin/src/index.ts` | **Hook 类型定义**：`Hooks` 接口，定义所有可用的 hook 签名 |
-| `packages/plugin/src/tool.ts` | **插件工具类型**：`ToolDefinition` 接口 |
-| `packages/opencode/src/plugin/index.ts` | **Plugin 服务**：加载内部/外部插件，`trigger()` 执行 hook |
-| `packages/opencode/src/plugin/loader.ts` | **插件加载器**：npm 安装、版本解析 |
-| `packages/opencode/src/plugin/shared.ts` | **插件工具函数**：spec 解析、ID 解析 |
+|---|---|
+| `packages/plugin/src/effect/plugin.ts` | `Context`、`Plugin`、`define()` |
+| `packages/plugin/src/effect/registration.ts` | `Hooks` / `Transform` / `Registration` 类型 |
+| `packages/core/src/plugin/hooks.ts` | `PluginHooks` 运行时：注册、`trigger`、`has` |
+| `packages/core/src/plugin.ts` | 插件激活注册表：代际、失败回退、scope |
+| `packages/core/src/plugin/supervisor.ts` | 内置 + SDK + 实例 + 外部插件的编排 |
+| `packages/core/src/plugin/module.ts` | 外部插件解析、安装、导入 |
+| `packages/core/src/plugin/internal.ts` | `pre` / `post` 内置插件清单 |
+| `packages/core/src/plugin/service.ts` | `Plugin.Service` 接口（`activate` / `hold` / `awaitActivation`） |
 
 ---
 
-## 2.2 Hook 类型一览
+## 2.2 Hook domain 一览
 
-`packages/plugin/src/index.ts` 中的 `Hooks` 接口定义了以下 hook：
+`PluginHooks` 的 domain 和事件来自 `packages/plugin/src/effect/*`：
 
-### 2.2.1 生命周期 Hooks
+### Session（`effect/session.ts`）
+
+| Hook | 时机 | 可修改 |
+|---|---|---|
+| `prompt` | 用户输入被准入前 | prompt 文本/文件/agents/skills、metadata、delivery |
+| `context` | 每次 primary 请求组装后 | system、messages、tools、options |
+| `compaction` | 压缩请求组装后 | 同上；可设置 `result` 跳过模型 |
+| `generate` | `Session.generate` | 同上 |
+| `title` | 标题请求 | 同上；可设置 `result` |
+| `model.request` | LLMRequest 完成后 | `baseURL`、`headers` |
+| `http.request` / `http.response` | 每次 HTTP | 请求/响应对象 |
+| `experimental.ws.handshake/send/receive` | WebSocket 传输 | URL/headers/frame |
+| `retry` | 每次重试决策 | `decision: { retry, delay }` |
+
+### Tool（`effect/tool.ts`）
+
+| Hook | 失败通道 | 说明 |
+|---|---|---|
+| `execute.before` | `Tool.Error` | 可改 `input`；抛错即拒绝该次调用 |
+| `execute.after` | 无 | 可改 `result` 或 `error`（`status: completed/error`） |
+
+### Permission（`effect/permission.ts`）
+
+| Hook | 说明 |
+|---|---|
+| `evaluate` | 单个权限规则评估时调用；可改 `effect`（allow/deny/ask）与 `message` |
+
+### Shell（`effect/shell.ts`）
+
+| Hook | 说明 |
+|---|---|
+| `create.before` | 子进程创建前；可改 command、cwd、timeout、shell、env |
+
+### AISDK（`effect/aisdk.ts`）
+
+| Hook | 说明 |
+|---|---|
+| `sdk` | 拿到 provider SDK 实例后，可替换 `sdk` |
+| `language` | 构造 `LanguageModelV3` 后，可替换 `language` |
+
+### 其它 domain
+
+`agent` / `command` / `mcp` / `model` / `provider` / `reference` / `skill` /
+`websearch` / `worktree` / `vcs` 主要是 **Transform + API**，个别带 hook。
+`event` 只有 `subscribe()`，没有可消化的 hook。
+
+---
+
+## 2.3 `PluginHooks.trigger` 的执行语义
+
+`packages/core/src/plugin/hooks.ts`：
 
 ```ts
-interface Hooks {
-  // 插件卸载时调用
-  dispose?: () => Promise<void>
+trigger(domain, name, event)
+  for (entry of callbacks[`${domain}.${name}`] ?? []) {
+    if (entry.options?.providerID && entry.options.providerID !== event.model?.providerID) continue
+    yield* entry.callback(event)
+  }
+  return event
+```
 
-  // 所有事件广播（session、message、tool 等事件的通配订阅）
-  event?: (input: { event: Event }) => Promise<void>
+规则：
 
-  // 插件加载后收到当前配置
-  config?: (input: Config) => Promise<void>
+1. **同一事件的所有回调串行执行**，顺序 = 注册顺序；
+2. **事件对象是原地修改的**（`event.messages.splice(...)`、`event.decision.retry = false`）；
+3. 只有声明了失败通道的 hook 可以失败（目前主要是 `tool.execute.before`）；
+4. `providerID` 选项只对带 `model` 的事件生效（session/model 请求、aisdk）；
+5. `has(domain, name, providerID?)` 可用于避免无谓的请求包装。
+
+`trigger` 返回同一个事件对象，调用方继续使用它。
+
+---
+
+## 2.4 Transform 的生效方式
+
+Transform 不是"立即改当前对象"，而是**登记到 State 的变换列表里，按注册顺序重放**：
+
+```
+State.create({ initial, editor })
+  transform(callback) → 登记 callback
+  reload()            → 清空草稿，按顺序重放所有 callback
+  transform 注册/释放 → 触发 reload
+```
+
+这带来几个重要性质：
+
+- 后注册的 transform 覆盖先注册的（同名字段）；
+- 卸载一个插件会重建注册表，被它覆盖的早期定义重新出现；
+- `reload()` 不改变优先级，只重新计算当前状态；
+- 每个模型请求捕获自己的 `Tool.Snapshot`，运行中 reload 不影响已开始的请求。
+
+`Agent` / `Skill` / `Tool` / `Provider` / `Model` / `MCP` 等都是这个模式。
+
+---
+
+## 2.5 插件加载与排序
+
+### 2.5.1 顺序
+
+`plugin/supervisor.ts` 的 `activate()`：
+
+```
+pre  = 内置 pre 插件
+     + SdkPlugins.all()
+     + InstancePlugins.all()
+     + 配置声明的外部插件（resolve 后）
+post = 内置 post 插件
+```
+
+最终激活顺序：
+
+```
+pre（内置 pre → SDK/实例 → 外部包） → post（内置 post）
+```
+
+- 外部插件在 `resolve()` 中按配置声明顺序加载；能立即加载的先激活，缺失依赖的包
+  在 `npm install` 完成后再跑第二轮。
+- 实例插件排在 SDK 之后，因此实例的显式选择覆盖全局默认。
+- 重复 ID：保留 boot 顺序中的第一个，后面的作为 failed 上报。
+
+### 2.5.2 `pre` 里有什么
+
+`plugin/internal.ts` 的 `pre` 是"运行时基础设施与工具"：
+
+```
+工具输入修复、worktree/mcp 配置、MCP CodeMode 默认值、well-known、VCS(git/hg)、
+Agent 内置定义、Plan 模式、Command、Skill、models.dev、Provider 插件、WebSearch 插件、
+编辑工具（patch/edit/glob/grep/opencode/mcp-resource/question/read/shell/skill/subagent/
+webfetch/websearch/write）…
+```
+
+### 2.5.3 `post` 里有什么
+
+`post` 是"读取用户配置并改写注册表"的插件：
+
+```
+ConfigInstruction、ConfigReference、ConfigAgent、Browser、
+ConfigCommand、ConfigCompaction、ConfigFormatter、ConfigImage、
+ConfigLocationWatcher、ConfigShell、ConfigSnapshot、ConfigToolOutput、
+ConfigCompatibility、ConfigSkill、ConfigProvider、ConfigWebSearch、ConfigPolicy
+```
+
+顺序很关键：例如 `ConfigAgent` 必须在 `Agent` 内置定义之后运行，
+才能覆盖 `build/plan/...` 并加入用户 agent。
+
+### 2.5.4 失败与热更新
+
+`Plugin.Service.activate()`：
+
+- 每次激活是一代（generation）；只重新加载发生变化的插件；
+- 新插件 setup 失败 → 记录 failed，**保留上一个可用版本**；
+- 插件 transform 失败 → 之后被禁用，并刷新受影响的服务状态；
+- 配置、插件文件、managed policy、SDK 插件变化都会触发重新激活（100ms debounce）。
+
+`Plugin.awaitActivation` 是会话准入与 runner 的等待点：确保插件就绪后再准备输入/模型请求。
+
+---
+
+## 2.6 外部插件
+
+### 2.6.1 声明
+
+```jsonc
+// opencode.jsonc
+{
+  "plugins": [
+    "opencode-my-plugin",                              // npm 包
+    { "package": "opencode-my-plugin", "options": { "level": 2 } },
+    "/abs/path/to/plugin-dir"                          // 本地目录（配置项必须是目录）
+  ]
 }
 ```
 
-### 2.2.2 Tool 相关 Hooks
+项目内还可以直接放文件，由目录发现加载：
 
-```ts
-  // 提供自定义工具
-  tool?: { [key: string]: ToolDefinition }
-
-  // 工具执行前（可修改或拒绝参数）
-  "tool.execute.before"?: (
-    input: { tool: string; sessionID: string; callID: string },
-    output: { args: any },
-  ) => Promise<void>
-
-  // 工具执行后（可查看/修改结果）
-  "tool.execute.after"?: (
-    input: { tool: string; sessionID: string; callID: string; args: any },
-    output: { title: string; output: string; metadata: any },
-  ) => Promise<void>
-
-  // 修改工具定义（描述和参数）发送给 LLM
-  "tool.definition"?: (
-    input: { toolID: string },
-    output: { description: string; parameters: any },
-  ) => Promise<void>
+```
+.opencode/plugin/*.ts
+.opencode/plugins/*.ts
 ```
 
-### 2.2.3 Chat 相关 Hooks
+（`PluginSourceDirectory.discover` 读取 `plugin` / `plugins` 目录；
+配置里显式写路径时只接受目录，不接受单个 `.ts` 文件。）
+
+### 2.6.2 模块契约
+
+`plugin/module.ts` 接受默认导出：
 
 ```ts
-  // 收到新消息时
-  "chat.message"?: (
-    input: { sessionID: string; agent?: string; model?: {...}; messageID?: string },
-    output: { message: UserMessage; parts: Part[] },
-  ) => Promise<void>
-
-  // 修改发送给 LLM 的参数（temperature、topP 等）
-  "chat.params"?: (
-    input: { sessionID: string; agent: string; model: Model; provider: ProviderContext; message: UserMessage },
-    output: { temperature: number; topP: number; topK: number; maxOutputTokens: number; options: Record<string, any> },
-  ) => Promise<void>
-
-  // 修改 HTTP 请求头
-  "chat.headers"?: (
-    input: { sessionID: string; agent: string; model: Model; provider: ProviderContext; message: UserMessage },
-    output: { headers: Record<string, string> },
-  ) => Promise<void>
+// Effect 版
+export default {
+  id: "my-plugin",
+  effect: (ctx) => Effect.gen(function* () {
+    yield* ctx.tool.transform((editor) => editor.add({ ... }))
+  }),
+}
 ```
 
-### 2.2.4 权限相关 Hooks
+或 Promise 版：
 
 ```ts
-  // 权限询问拦截
-  "permission.ask"?: (
-    input: Permission,
-    output: { status: "ask" | "deny" | "allow" },
-  ) => Promise<void>
+export default {
+  id: "my-plugin",
+  setup: async (ctx) => { ... },
+}
 ```
 
-### 2.2.5 Shell 与 Command Hooks
+加载流程：
+
+```
+解析 target（绝对路径视为本地，否则 npm）
+  → npm resolve / add（可跳过安装）
+  → Host.resolve 找到 entrypoints.server
+  → 动态 import
+  → Schema 校验 default.id + effect/setup
+  → 包装成 Generation { id, revision, source, effect }
+```
+
+`engines`/兼容性、managed policy（`integration.use`）在加载前检查；
+失败会记录在 `Plugin.Info.state = failed`，不会拖垮整个进程。
+
+### 2.6.3 插件上下文
+
+`Context`（`packages/plugin/src/effect/plugin.ts`）包含：
 
 ```ts
-  // 修改 Shell 环境变量
-  "shell.env"?: (
-    input: { cwd: string; sessionID?: string; callID?: string },
-    output: { env: Record<string, string> },
-  ) => Promise<void>
-
-  // 命令执行前
-  "command.execute.before"?: (
-    input: { command: string; sessionID: string; arguments: string },
-    output: { parts: Part[] },
-  ) => Promise<void>
+{
+  app, location, options,
+  agent, aisdk, command, event,
+  experimental: { terminal },
+  integration, mcp, model, generate, permission, plugin,
+  provider, reference, rpc, session, shell, skill,
+  storage, tool, vcs, websearch, worktree
+}
 ```
 
-### 2.2.6 Auth / Provider Hooks
+每个 domain 同时提供：
+- 对 Effect API client 的调用（例如 `ctx.session.prompt(...)`）；
+- 本 domain 的 `transform` / `reload`；
+- 需要的事件 hook。
 
-```ts
-  // OAuth / API 认证
-  auth?: AuthHook
-
-  // Provider 模型注入
-  provider?: ProviderHook
-```
-
-### 2.2.7 实验性 Hooks
-
-```ts
-  // 消息发送给 LLM 前批量转换
-  "experimental.chat.messages.transform"?: (
-    input: {},
-    output: { messages: { info: Message; parts: Part[] }[] },
-  ) => Promise<void>
-
-  // System prompt 变换
-  "experimental.chat.system.transform"?: (
-    input: { sessionID?: string; model: Model },
-    output: { system: string[] },
-  ) => Promise<void>
-
-  // 小模型推荐
-  "experimental.provider.small_model"?: (
-    input: { provider: ProviderV2 },
-    output: { model?: ModelV2 },
-  ) => Promise<void>
-
-  // Compaction 自定义 prompt
-  "experimental.session.compacting"?: (
-    input: { sessionID: string },
-    output: { context: string[]; prompt?: string },
-  ) => Promise<void>
-
-  // Compaction 后自动继续控制
-  "experimental.compaction.autocontinue"?: (
-    input: { sessionID: string; agent: string; model: Model; ... },
-    output: { enabled: boolean },
-  ) => Promise<void>
-
-  // 文本完成后处理
-  "experimental.text.complete"?: (
-    input: { sessionID: string; messageID: string; partID: string },
-    output: { text: string },
-  ) => Promise<void>
-```
+`storage` 是按插件 ID 隔离的 KV；`rpc` 可以注册自定义 HTTP 端点。
 
 ---
 
-## 2.3 Hook 触发机制
+## 2.7 两个最小示例
 
-### 2.3.1 Plugin.trigger()
-
-`packages/opencode/src/plugin/index.ts:280`：
+### 2.7.1 注册一个只读工具
 
 ```ts
-const trigger = Effect.fn("Plugin.trigger")(function* (
-  name: TriggerName,
-  input: Input,
-  output: Output,
-) {
-  const state = yield* InstanceState.get(state)
-  // 遍历所有已注册的 hook，如果 hook 有对应的 name 函数就调用
-  for (const hook of state.hooks) {
-    const fn = hook[name]
-    if (!fn) continue
-    yield* Effect.promise(async () => fn(input, output))
-  }
-  return output  // 返回可能被修改的 output
+import { define } from "@opencode/plugin/effect/plugin"
+import { Effect, Schema } from "effect"
+
+export default define({
+  id: "example.word-count",
+  effect: Effect.fn(function* (ctx) {
+    yield* ctx.tool.transform((editor) =>
+      editor.add({
+        name: "word_count",
+        description: "Count words in the provided text.",
+        input: Schema.Struct({ text: Schema.String }),
+        execute: (input) =>
+          Effect.succeed({ output: String(input.text.trim().split(/\s+/).filter(Boolean).length) }),
+      }),
+    )
+  }),
 })
 ```
 
-核心模式：
-- **input** 是只读上下文信息
-- **output** 是可被修改的对象，hook 可以直接修改其属性
-- 所有匹配的 hook **串行**执行
-- 返回可能被修改后的 output
+> 需要访问文件时，外部插件应使用 `ctx` 暴露的 API（或工具/会话 API）；
+> Core 内部插件可以直接使用 Location 范围的 `FSUtil.Service`。两者都不要直接
+> `node:fs` 绕过 Location 约束。
 
-### 2.3.2 Hook 触发位置
-
-| 触发位置 | Hook 列表 |
-|----------|----------|
-| `session/prompt.ts` 主循环 | `command.execute.before`、`experimental.chat.messages.transform`、`experimental.chat.system.transform` |
-| `session/prompt.ts` subtask | `tool.execute.before`、`tool.execute.after` |
-| `session/tools.ts` 工具解析 | `tool.execute.before`、`tool.execute.after` |
-| `session/processor.ts` 事件处理 | `experimental.text.complete` |
-| `session/llm.ts` LLM 调用 | `chat.params`、`chat.headers` |
-| `tool/registry.ts` 工具过滤 | `tool.definition` |
-| `agent/agent.ts` Agent 构建 | `experimental.chat.system.transform` |
-| `shell.ts` Shell 执行 | `shell.env` |
-
-### 2.3.3 TriggerName 类型约束
-
-只允许 `(input, output) => Promise<void>` 签名的 hook 通过 `trigger()` 调用：
+### 2.7.2 给模型请求加 header
 
 ```ts
-type TriggerName = {
-  [K in keyof Hooks]-?: NonNullable<Hooks[K]> extends (input: any, output: any) => Promise<void> ? K : never
-}[keyof Hooks]
+export default define({
+  id: "example.header",
+  effect: Effect.fn(function* (ctx) {
+    yield* ctx.session.hook("model.request", (event) => {
+      event.headers["x-example"] = "1"
+      return Effect.void
+    })
+  }),
+})
 ```
 
-这排除了 `dispose()`、`event()`、`config()`、`auth`、`provider`、`tool` 等不同签名的 hook。
+### 2.7.3 拦截工具参数
+
+```ts
+import { Tool } from "@opencode/schema/tool"
+import { Effect } from "effect"
+
+export default define({
+  id: "example.guard",
+  effect: Effect.fn(function* (ctx) {
+    yield* ctx.tool.hook("execute.before", (event) => {
+      if (event.tool !== "shell") return Effect.void
+      // 只允许只读命令
+      if (!/^(ls|rg|git status)\b/.test(String((event.input as { command?: unknown }).command))) {
+        return Effect.fail(new Tool.Error({ message: "read-only shell only" }))
+      }
+      return Effect.void
+    })
+  }),
+})
+```
+
+> `execute.before` 的唯一失败类型是 `Tool.Error`；抛其它错误会变成 defect。
+> 用户拒绝权限（`Permission.DeclinedError`）不在这里处理，它由工具叶子抛出并在
+> `SessionModelRequest.executeTool` 边界恢复为失败。
 
 ---
 
-## 2.4 插件加载流程
+## 2.8 权限 Hook 与内置策略
 
-### 2.4.1 初始化
-
-`packages/opencode/src/plugin/index.ts` — `Plugin.state()` (InstanceState)：
+`Permission.evaluate(action, resource, ...rulesets)`：
 
 ```
-1. 创建 SDK Client（用于插件内部调用 opencode API）
-2. 加载内置插件（internalPlugins）：
-   ├─ CodexAuthPlugin（OpenAI Codex OAuth）
-   ├─ CopilotAuthPlugin（GitHub Copilot）
-   ├─ GitlabAuthPlugin
-   ├─ PoeAuthPlugin
-   ├─ CloudflareWorkersAuthPlugin
-   ├─ CloudflareAIGatewayAuthPlugin
-   ├─ AzureAuthPlugin
-   ├─ DigitalOceanAuthPlugin
-   ├─ SnowflakeCortexAuthPlugin
-   └─ XaiAuthPlugin
-3. 加载外部插件：
-   ├─ 解析 config.plugin_origins（spec → npm 包）
-   ├─ PluginLoader.loadExternal() 安装和加载
-   └─ 调用 applyPlugin() 实例化
-4. 触发所有 hook 的 config() 调用
-5. 订阅全局事件流 → 触发所有 hook 的 event()
+从后往前找最后一条同时匹配 action 与 resource 的规则
+  → 没有匹配则 ask
 ```
 
-### 2.4.2 外部插件加载
+规则来源按顺序叠加（后者覆盖前者）：
 
-`PluginLoader.loadExternal()`:
-1. 解析插件 specifier（`npm:package@version` 格式）
-2. 安装 npm 依赖
-3. 动态 import 模块
-4. 检测兼容性
-5. 调用插件工厂函数 `plugin(input) => Hooks`
-
-### 2.4.3 插件输入（PluginInput）
-
-```ts
-interface PluginInput {
-  client: OpencodeClient       // SDK client
-  project: Project             // 当前项目信息
-  directory: string            // 工作目录
-  worktree: string             // 工作树根目录
-  experimental_workspace: {
-    register(type, adapter)    // 注册 workspace 适配器
-  }
-  serverUrl: URL               // 服务器 URL
-  $: BunShell                  // Bun shell
-}
 ```
+Agent.Info.permissions（包含配置里的全局 permissions）
+  → 会话 permissions（Session.setPermissions）
+  → 保存的 "always" 授权（PermissionSaved）
+```
+
+`permission.evaluate` hook 可以在最终决策前改写 `effect` 或 `message`，
+但不会替代 `Permission.assert` 的"询问 → 等待用户回复"流程。
+权限请求以 `permission.asked` 事件推送给客户端，客户端回复
+`permission.replied`（once / always / reject）。
 
 ---
 
-## 2.5 内置 Auth 插件详解
+## 2.9 TUI 插件
 
-以 Copilot 为例（`packages/opencode/src/plugin/github-copilot/copilot.ts`）：
+TUI 也有一套独立插件接口（`@opencode/plugin/tui`）：
 
-Auth hook 结构：
 ```ts
-interface AuthHook {
-  provider: string
-  loader?: (auth, provider) => Promise<Record<string, any>>
-  methods: Array<{
-    type: "oauth" | "api"
-    label: string
-    prompts?: Array<...> // 收集用户输入
-    authorize(inputs?) => Promise<AuthResult> // 执行认证
-  }>
-}
+import { define } from "@opencode/plugin/tui"
+
+export default define({
+  id: "my-tui-plugin",
+  setup: (ctx) => {
+    // 注册命令、slot、面板、route…
+    return () => { /* cleanup */ }
+  },
+})
 ```
 
-支持的认证方式：
-- **OAuth**：自动回调或 code 模式
-- **API Key**：用户输入 API key
-
-每个 auth 插件负责：
-1. 提供登录界面（CLI 或 TUI 中的 prompts）
-2. 执行 OAuth 流程
-3. 存储认证凭据
-4. 返回 token 供 LLM 调用使用
+它运行在客户端进程，不参与 server 的 `PluginHooks`；两者可以同名但互不影响。
+具体可用 API 见 `packages/plugin/src/tui/context.ts` 与
+`packages/tui/src/plugin/*`。
 
 ---
 
-## 2.6 Provider Hook
+## 2.10 小结
 
-```ts
-interface ProviderHook {
-  id: string
-  models?: (provider: ProviderV2, ctx: { auth?: Auth }) => Promise<Record<string, ModelV2>>
-}
-```
+1. **Transform 建表，Hook 改事件**：前者是有序重放的注册表，后者是串行的事件回调。
+2. **顺序即语义**：内置 pre → SDK/实例/外部 → 内置 post；后注册覆盖先注册。
+3. **失败可回退**：插件 setup 失败保留上一版；transform 失败会被禁用并刷新状态。
+4. **外部插件是普通模块**：默认导出 `{ id, effect|setup }`，支持 npm 与本地目录。
+5. **所有注册都受 scope 管理**：插件卸载 = 关闭 scope = 自动 dispose。
+6. **TUI 插件是另一套接口**：不要和 server 插件混用。
 
-Provider hook 允许插件动态注入模型列表。例如 Copilot 插件通过此 hook 提供 Copilot 专有模型。
-
----
-
-## 2.7 插件工具（Plugin-Provided Tools）
-
-插件可通过 `tool` hook 提供自定义工具：
-
-```ts
-interface ToolDefinition {
-  description: string
-  args?: Record<string, z.ZodType>
-  execute(args: any, ctx: PluginToolContext): Promise<string | ToolResult>
-}
-```
-
-在 `tool/registry.ts` 中：
-1. 扫描配置目录下的 `{tool,tools}/*.js|ts` 文件
-2. 从插件 hooks 中提取 `tool` 定义
-3. 包装为统一 `Tool.Def` 格式
-4. 内部使用 `EffectBridge` 桥接 Promise API 和 Effect API
+> **迁移小注**：旧文档里的 `Hooks` 接口、`chat.message`、`chat.params`、
+> `tool.definition`、`experimental.*` hook 名称属于 V1；V2 对应的是
+> `session.prompt/context`、`session.model.request`、`tool.execute.before/after` 等。

@@ -1,6 +1,6 @@
 # 11. 后台任务主动唤醒：bash 转后台后，对话怎么"自动续上"
 
-> 本课回答：**opencode v2 调用的 bash 后台程序完成后，能主动发起对话吗？**
+> 本课回答：**opencode V2 调用的 bash 后台程序完成后，能主动发起对话吗？**
 > 结论：能——**agent 自己发起的后台任务**（`shell` 工具 `background: true`）完成时，会把一条
 > synthetic 消息写进持久化收件箱并 **wake 会话**：会话空闲就新起一轮执行，运行中就在下一个
 > 安全边界注入。模型因此敢承诺 *"DO NOT poll, you will be resumed automatically"*。
@@ -27,9 +27,9 @@
 1. `shell.create(...)` 起真实子进程；`background: true` 时 `timeout = input.timeout ?? 0`（不限时）
 2. `jobs.start({ id, type: "shell", recovery: { kind: "shell", sessionID, shellID, command }, run })`
    注册成 **Job**——可恢复任务：
-   - 有 `recovery` 的 Job 启动时分配 `notificationID`（`packages/core/src/job.ts:364`）
+   - 有 `recovery` 的 Job 启动时分配 `notificationID`（`packages/core/src/job.ts`）
    - 转后台时整个 Background 记录持久化到 KV `job.background/<notificationID>`
-     （`job.ts:199-202`）——**跨 server 重启存在**
+     （`job.ts`）——**跨 server 重启存在**
 3. `jobs.background(job.id)` 标记转后台；fork `notifyWhenDone` 观察者；
    工具**立即返回**：
 
@@ -38,22 +38,22 @@
    Output is streaming to: <file>
    ```
 
-4. 返回内容附带 `BACKGROUND_INSTRUCTION`（shell.ts:25-26），这是**给模型的协议**：
+4. 返回内容附带 `BACKGROUND_INSTRUCTION`（shell.ts），这是**给模型的协议**：
 
    > You will be notified automatically when the command finishes... **DO NOT poll**...
    > If you have nothing else to do, end your response; **you will be resumed automatically**
    > when the command finishes.
 
-   前台命令被打断/转后台（`jobs.block` 返回 `backgrounded`）走同一条路（shell.ts:262-266）。
+   前台命令被打断/转后台（`jobs.block` 返回 `backgrounded`）走同一条路（shell.ts）。
 
 ## 11.3 完成时：`notifyWhenDone` → `sessions.synthetic`
 
-观察者 fiber（shell.ts:156-188）：
+观察者 fiber（shell.ts）：
 
 ```
 jobs.wait({ id })                       # 等 Job 终态：completed / error / cancelled
   → 收集输出（shell 捕获结果经 Deferred 送达；error 取 info.error；cancelled 取 "Cancelled"）
-  → ShellResult.notification({...})     # packages/core/src/shell/result.ts:45
+  → ShellResult.notification({...})     # packages/core/src/shell/result.ts
       文本形如:
       <shell id="job-..." state="completed" command="bun run build">
       ...命令输出...
@@ -68,7 +68,7 @@ jobs.wait({ id })                       # 等 Job 终态：completed / error / c
   → jobs.completeBackground(notificationID)   # 清 KV 记录
 ```
 
-`Session.synthetic`（`packages/core/src/session/session.ts:273`）做两件事：
+`Session.synthetic`（`packages/core/src/session/session.ts`）做两件事：
 
 ```ts
 const admittedInput = {
@@ -83,7 +83,7 @@ if (input.resume !== false && !session.revert)
 
 ## 11.4 wake 语义：空闲起新执行，运行中合并
 
-`SessionRunCoordinator.wake`（`packages/core/src/session/run-coordinator.ts:136`）：
+`SessionRunCoordinator.wake`（`packages/core/src/session/run-coordinator.ts`）：
 
 ```
 wake(sessionID):
@@ -96,14 +96,14 @@ wake(sessionID):
 
 ## 11.5 投递：synthetic 消息如何进入模型上下文
 
-新执行（或 successor drain）在 `SessionRunner.drain` 里推进（`runner/llm.ts:54`）：
+新执行（或 successor drain）在 `SessionRunner.drain` 里推进（`runner/llm.ts`）：
 
 ```
 advanceToStep 循环:
   nextPromotable(db, sessionID, 边界scope)
     ├─ 有 pending steer → 优先取（任何边界 steer 都赢）
     └─ scope="input"（入口/空闲边界）才轮到一条 queue
-  SessionInbox.promote(db, bus, sessionID, scope)   # inbox.ts:496
+  SessionInbox.promote(db, bus, sessionID, scope)   # inbox.ts
     ├─ steers 按入队顺序整批提升；遇到控制项（compaction/move）停下不越过
     ├─ publish → bus.publish(session.inbox.delivered, ...)
     │    ★ 同一个事务：消费 session_inbox 行 + 插入可见消息（投影）
@@ -116,7 +116,7 @@ advanceToStep 循环:
 - **会话空闲**（agent 已结束回答）：wake 直接新起一轮执行——通知作为新的输入被提升，
   模型带着命令输出继续干活。这就是"后台程序完成后主动发起对话"。
 - **会话运行中**：wake 合并进当前执行；在每个 step 之间的安全边界
-  （`runner/llm.ts:80-109`，scope 收窄为 `"steer"`）通知被提升，同一轮执行的下一次
+  （`runner/llm.ts`，scope 收窄为 `"steer"`）通知被提升，同一轮执行的下一次
   `llm.stream` 就能看到它——不打断正在流的调用。
 
 投递语义与第 4 课的 steer/queue 完全一致；synthetic 完成通知走的就是 steer 通道。
@@ -125,11 +125,11 @@ advanceToStep 循环:
 
 | 关注点 | 机制 | 位置 |
 |---|---|---|
-| 通知不重复 | `notificationID` 复用为 inbox 条目 ID，admit 幂等 | `job.ts:364`、`session.ts:298` |
-| 客户端断开不影响 | 观察者 fork 在 server 的 plugin scope；"server owns completion recording" | `session.ts:184` |
-| server 重启不丢 | Background 记录在 KV；启动恢复补发通知（shell 标记 cancelled） | `job.ts:199`、`restart.ts:101` |
-| 输出不再可得 | shell 输出文件被清理时回退 "Shell command output is no longer available." | `shell/result.ts:12` |
-| 通知会话已删 | `Session.NotFoundError` → 静默吞掉 | `session.ts:217` |
+| 通知不重复 | `notificationID` 复用为 inbox 条目 ID，admit 幂等 | `job.ts`、`session.ts` |
+| 客户端断开不影响 | 观察者 fork 在 server 的 plugin scope；"server owns completion recording" | `session.ts` |
+| server 重启不丢 | Background 记录在 KV；启动恢复补发通知（shell 标记 cancelled） | `job.ts`、`restart.ts` |
+| 输出不再可得 | shell 输出文件被清理时回退 "Shell command output is no longer available." | `shell/result.ts` |
+| 通知会话已删 | `Session.NotFoundError` → 静默吞掉 | `session.ts` |
 
 ## 11.7 完整时序：agent 发起后台构建
 
@@ -159,9 +159,20 @@ advanceToStep 循环:
 - `background: true` → `subagents.background(recovery)`（Job，kind `"subagent"`，
   持久化父子会话 ID）→ 立即返回 *"You will be notified automatically when it finishes"*
 - 子会话完成 → `SubagentCompletion.deliver` 向**父会话**注入 synthetic 通知（含子会话结果摘要）
-- 重启恢复时（`restart.ts:138`）子会话还能续则续跑，否则向父会话补发结果通知
+- 重启恢复时（`restart.ts`）子会话还能续则续跑，否则向父会话补发结果通知
 
-## 11.9 小结
+## 11.9 对插件/工具开发的启示
+
+- **工具不要在 step 里无限等待**：长任务应尽快返回，把"完成"作为新输入注入。
+  当前后台 Job 是 Core 内部能力，外部插件 Context 没有直接暴露；
+  插件应把长任务拆成可轮询的短工具，或通过 `ctx.session.synthetic` 在完成时通知。
+- **完成通知 = synthetic 消息**：不要试图直接改历史；走 `synthetic` 才能获得
+  准入、持久化、wake 和边界晋升。
+- **唤醒策略要克制**：只有"模型确实需要继续工作"时才默认 resume；
+  纯提醒/状态同步用 `resume: false`，避免空闲会话被无故拉起。
+- **幂等键很重要**：通知用稳定 ID，重试/重启不会产生重复消息。
+
+## 11.10 小结
 
 1. **完成通知 = synthetic steer 消息 + wake**，不是回调、不是轮询——走和用户输入同一条
    持久化收件箱链路。

@@ -1,288 +1,452 @@
-# 6. 一次对话的全过程：消息构造 → Agent 循环 → 流式事件
+# 06. 一次对话的全过程：从按下回车到流式渲染
 
-> 承接第 5 课（TUI 启动与配置/插件/provider 装配）。本课追踪：输入框敲回车后，消息在 TUI 如何构造、经 HTTP 到 `SessionPrompt`、如何生成 system prompt 与 model messages、工具怎么执行、thinking/tool-use 是并行还是串行，以及结果怎么"流"回界面。
-
-## 6.0 总览
-
-```
-[输入框 submit]                          packages/tui/src/component/prompt/index.tsx
-   │  session.create (新会话) / 复用 sessionID
-   │  parts = [editorContext?, text, file/agent/subtask...]
-   ▼
-POST /session/:id/message                 handlers/session.ts → SessionPrompt.prompt
-   │
-   ▼
-createUserMessage(prompt.ts:635)
-   ├─ agent 解析 (input.agent ?? defaultInfo)
-   ├─ model 解析 (input.model ?? agent.model ?? 会话当前模型) + variant
-   ├─ parts 解析 (文本/文件/目录/MCP资源/图片归一化/subtask)
-   ├─ plugin.trigger("chat.message")
-   └─ 写库 session.message + 逐 part 写库（同时发布 EventV2 事件）
-   │
-   ▼
-loop → SessionRunState.ensureRunning → runLoop(prompt.ts:1081)
-   ├─ 每轮 step：
-   │   ├─ 过滤压缩历史 filterCompacted → MessageV2.latest
-   │   ├─ 终止判断 (finish≠tool-calls 且无工具调用)
-   │   ├─ title/summary 后台 fork；subtask→task 工具；compaction→重发
-   │   ├─ 组装 system prompt (env + skills + instructions + mcp + agent/provider prompt)
-   │   ├─ MessageV2.toModelMessagesEffect(历史→ModelMessage)
-   │   ├─ SessionTools.resolve → tools (tool.definition hook)
-   │   └─ processor.create + handle.process(...)
-   │           │  (LLM stream: AI SDK streamText 执行工具)
-   │           ▼
-   │   processor.ts: LLMEvent 流 → 写 part + 发事件
-   │         reasoning-* / tool-input-* / tool-call / tool-result
-   │         step-start/finish(usage+成本+快照) / text-start/delta/end
-   │   ▼
-   │   "continue" → 回到 runLoop 下一 step；"stop|compact" → 退出
-   │
-   ▼
-EventV2Bridge → GlobalBus → RPC/SSE → TUI sync store → 渲染
-```
-
-## 6.1 TUI 侧：回车后发什么
-
-位置：`packages/tui/src/component/prompt/index.tsx` 的 `submit`（`:929`，防重入）→ `submitInner`（`:946`）：
-
-1. 兜底 IME 刷新 `store.prompt.input`；空/不可用直接返回；`exit/quit/:q` 退出。
-2. 取当前 agent（`local.agent.current()`）与模型（`local.model.current()`，来自 `context/local.tsx:236-245`；未选模型时弹 `DialogProviderList` 警告）。
-3. `sessionID == null` 时先 **`session.create`**（`:999-1008`）——参数：`directory`/`workspace`/`agent`/`model {providerID,id,variant}`；创建失败 toast。
-4. 组装 parts（`:1101-1108`）：
-   - `editorParts`：编辑器选区上下文（`editor.labelState()==="pending"` 时，`formatEditorContext(...)` 生成 synthetic text part，`:1041-1056`）。
-   - `{type:"text", text: inputText}`：正文。
-   - `nonTextParts`：粘贴/拖拽产生的 file/agent part（extmark 关联，`:1035-1036`），粘贴内容先经 `expandTrackedPastedText` 内联展开（`:1025-1033`）。
-5. 三种模式分发：
-   - **shell 模式**（`store.mode==="shell"`）：`session.shell`（`:1060-1068`）。
-   - **命令** `/xxx`（`:1070-1090`，且 `sync.data.command` 里存在）：`session.command`（`:1082-1090`，含参数解析与 file parts）。
-   - **普通**：`session.prompt({ sessionID, model, agent, variant, parts }, {throwOnError:true})`（`:1093-1111`）——fire & forget（`void ...`），**界面不靠响应体渲染**，靠 §6.7 的 SSE 事件。
-6. 清空输入、`history.append`、新会话 50ms 后 `route.navigate` 进 `session` 路由（`:1133-1142`）。
-
-请求体 `PromptPayload` 的契约在 `groups/session.ts:316-330`；`POST /session/:sessionID/message`（`SessionPaths.prompt`，`groups/session.ts:96`）→ `handlers/session.ts:294-309`：`requireSession` 后 `promptSvc.prompt({...payload, sessionID})`，**handler 同步返回**一个 JSON（`HttpServerResponse.stream` 单条），实际对话全在 SSE 事件里。
-
-## 6.2 server 侧：createUserMessage 怎么造出第一条 user message
-
-位置：`src/session/prompt.ts:635-1050` `createUserMessage`（`Effect.scoped`）。
-
-1. **Agent 解析**（`:636-644`）：`input.agent` 命中则 `agents.get`，否则 `agents.defaultInfo()`；不存在 → publish `Session.Event.Error` + 抛 `Agent not found`。
-2. **模型解析**（`:646-654`）：`input.model ?? ag.model ?? currentModel(sessionID)`；variant 优先 `input.variant`，否则 agent 的 `ag.variant`（且须在模型 variants 里，`:648-654`）。`currentModel`（`:614-633`）从 `SessionTable.model` 读会话记录模型 → 回退最近一条带 model 的 user message → `provider.defaultModel()`。
-3. **user message 记录**（`SessionV1.User`，`:656-670`）：`id`、`agent`、`model{providerID,modelID,variant}`、`tools`、`system`、`format`。
-   - **会话级 model/agent 落库**：与 `sessions.get` 的当前值不同则 `sessions.setAgentModel`（`:672-689`）。这就是"切模型后下一条生效"的机制。
-4. **parts 解析** `resolvePart`（`:699-993`），对每个用户 part：
-   - `file` + `source.type==="resource"`（MCP 资源，`:703-784`）：先写一条 synthetic 文本"Reading MCP resource: ..."，然后 `mcp.readResource`；文本内容转 text part；blob 按 mime/size 过滤（10MB、白名单 `application/pdf,image/*`），超限/不支持写省略提示；读失败写错误文本。
-   - `file` + `data:` URL（`:786-807`）：text/plain 展开为 `decodeDataUrl` 的文本 + 判断是否保留原始 file part。
-   - `file` + `file:`（`:808-971`）：`text/plain`/`application/x-directory` 走 **Read 工具真身执行**（`registry.named().read.execute`，`:813-828`）；带 `?start=&end=` 区间先用 LSP `documentSymbol` 定位符号（`:839-850`）；返回"Called the Read tool with the following input: {...}" synthetic 文本 + 输出/附件。非文本 mime → 读文件 base64 成 `data:` URL part（`:949-969`）。
-   - `agent`（`:974-990`）：把用户召唤的子代理写成 part + synthetic 提示"用 task 工具带 subagent 调用"，并带权限评估（`Permission.evaluate("task",...)`）。
-   - 普通 `text`/`subtask`：直通（`:992`）。
-5. **`plugin.trigger("chat.message", {...}, { message, parts })`**（`:999-1009`）——插件可改消息与原 parts。
-6. **图片归一化**：`mime.startsWith("image/")` 的 file part 过 `image.normalize`（缩小超限图片，`:1011-1020`）。
-7. **写库**：`decodeMessageInfo` 校验（`:1022-1044`，失败仅告警）→ `sessions.updateMessage(info)` + 逐 part `sessions.updatePart`（`:1046-1047`）。`updateMessage`/`updatePart`（`session.ts:631-649`）会向 `EventV2Bridge` publish `SessionV1.Event.MessageUpdated/PartUpdated` —— 这是 TUI 渲染的源头。
-8. `prompt()`（`:1052-1071`）：`revert.cleanup` → `createUserMessage` → `session.touch` → 把 `input.tools` 转为 session permission（`:1060-1067`）→ `noReply===true` 直接返回，否则 `loop({sessionID})`。
-
-## 6.3 Agent 循环主体：runLoop
-
-`loop`（`prompt.ts:1343-1347`）→ `state.ensureRunning(sessionID, lastAssistant, runLoop(result))`（`run-state.ts:88-93`）：**同一会话只有一个 run 在执行**（重入会被合并/等待），cancel 走 `run-state.ts:77-85`。
-
-`runLoop`（`prompt.ts:1081-1341`）是一个 `while(true)`：
-
-1. **状态**：`status.set(sessionID, {type:"busy"})`（`:1089`）。
-2. **取历史**：`MessageV2.filterCompactedEffect(sessionID)`（`:1092-1094`）——把历史重排成模型可读序列（compaction 摘要 + 压缩后保留的尾巴，实现 `message-v2.ts:521-572`）。
-3. **latest**（`message-v2.ts:585-601`）：按最大 id 找出 `user/assistant/finished`，并收集未完成的工作任务 `tasks`（compaction part / subtask part）。
-4. **终止判断**（`:1111-1130`）：`lastAssistant.finish` 存在、不是 `tool-calls`、且没有残留工具调用（`hasToolCalls`，`:1106-1109`；被 cleanup 标记 `interrupted` 的孤儿工具不算）、且 `lastUser.id < lastAssistant.id` → break（正常结束）。
-5. **第一步**：后台 fork `title`（`:1133-1139`，小模型生成标题，`prompt.ts:193-253`）与 `summary`（`:1252-1253`，`session/summary.ts`）。
-6. **任务处理**：
-   - `task.type==="subtask"` → `handleSubtask`（`:1144-1146`，定义 `:255-449`）：直接执行 **task 工具**，内部走 `taskTool.execute(taskArgs, {...})`——takes `Agent.Info`/`messages`/`abort`/`ask`，递归跑一个"子会话"（主循环通过 `promptOps`（`:144-150` 的 `ops()`）把 `prompt/loop/cancel` 借给 task 工具）。完成写回 tool part；若带 `command` 再补一条 synthetic 用户消息（`:430-448`）。
-   - `task.type==="compaction"` → `compaction.process`（`:1149-1159`）。
-   - **溢出检查**（`:1161-1168`）：`lastFinished && !summary && compaction.isOverflow(tokens)` → `compaction.create({auto:true})` 后 continue。
-7. **Agent 与步数**：`agents.get(lastUser.agent)`（`:1170`）；`maxSteps = agent.steps ?? Infinity`，`isLastStep = step>=maxSteps`（`:1178-1179`）——最后一步会给模型追加 `MAX_STEPS_PROMPT`。
-8. **提醒注入**：`SessionReminders.apply`（`:1180-1184`）。
-9. **assistant 消息**：`id=MessageID.ascending()`、`parentID=lastUser.id`、`mode/agent`、`path{cwd,root}`、cost/tokens 清零、`modelID/providerID`（`:1186-1201`），`sessions.updateMessage(msg)`。
-10. **processor.create**(`:{1213-1219}`)：见 §6.4。
-11. **工具集** `SessionTools.resolve`（`:1226-1241`）：见 §6.5；若 `lastUser.format.type==="json_schema"` 再注入 `StructuredOutput` 工具（`:1243-1250`，`json_schema` 时 `toolChoice:"required"`，`:1285`）。
-12. **system prompt 组装**（`:1257-1271`）：
-    ```
-    system = [...env, ...instructions, ...(mcpInstructions?[mcpInstructions]:[]), ...(skills?[skills]:[])]
-    ```
-    - `sys.environment(model)`（`system.ts:60-96`）：模型身份、cwd/worktree、git、平台、日期 + 可用 references。
-    - `sys.skills(agent)`（`system.ts:98-110`）：skill tool 未被禁用时把可用 skills 描述塞进 system（verbose 版，见 `skill/index.ts` 的 `fmt`）。
-    - `instruction.system()`：全局指令（`src/session/instruction.ts`）。
-    - `sys.mcp(agent, session.permission)`（`system.ts:112-128`）：MCP server 的 `<mcp_instructions>`（被 permission 禁用的工具整段剔除）。
-13. **历史转模型消息**：`MessageV2.toModelMessagesEffect(msgs, model)`（`:1262`，`message-v2.ts:131-415`）：
-    - 用户消息：text part 直通；file part（非 text/plain、非目录）转 `{type:"file",url,mediaType,filename}`；compaction part 转 "What did we do so far?"；subtask part 转 "The following tool was executed by the user"（`:198-242`）。
-    - assistant 消息：text（携带 `providerMetadata`）、`step-start`、tool part 按状态转 `tool-<name>`（completed→output-available；error→output-error；pending/running→`[Tool execution was interrupted]`，防 Anthropic 悬空 tool_use，`:349-360`）；reasoning part 保留（**换模型时降级为普通 text**，`:362-376`）；工具输出里的媒体按 provider 能力抽取为独立 user 消息再发送（`:298-305`、`:380-399`，`supportsMediaInToolResult` 白名单 `:147-159`）。
-    - 最后 `convertToModelMessages`（`:406-414`）转成 AI SDK `ModelMessage[]`。
-14. **`handle.process({...})`**（`:1272-1286`）→ 产出一个 `Result = "compact"|"stop"|"continue"`（`processor.ts:30`）：
-    - `structured !== undefined` → 写入 message 的 `structured` 字段，break（`:1288-1293`）。
-    - **stop-filter 语义**（`:1295-1317`）：`finish==="content-filter"` 或 json_schema 未产出 → 写错误并 break。
-    - `result==="stop"` → break（`:1319`）；`"compact"` → `compaction.create({auto:true,overflow})`（`:1320-1328`）；否则 continue 下一轮。
-
-整个 loop 结束时 `compaction.prune`（`:1338`）并返回最后一条 assistant 消息（`lastAssistant`，`:1073-1079`）。
-
-## 6.4 processor：LLM 事件流 → 持久化 part
-
-位置：`src/session/processor.ts`。
-
-- `create`（`:98`）：**先** `snapshot.track()` 抓取快照（注释 `:99-101`：AI SDK 可能先执行工具再发 step-start，抓晚了就丢了 diff），构建 `ctx`，返回 `Handle{message, updateToolCall, completeToolCall, process}`。
-- `process`（`:627-683`）：
-  1. `status.set(busy)`；`llm.stream(streamInput)`（`:640`）。
-  2. `Stream.tap(handleEvent)` 逐个消费 `LLMEvent`，`Stream.takeUntil(needsCompaction)`（`:642-646`）。
-  3. 中断：`onInterrupt` 标记 `aborted` 并 `halt(AbortError)`（`:648-655`）。
-  4. `Effect.retry(SessionRetry.policy(...))`——按 provider 的 API 错误重试策略（`:660-674`，`session/retry.ts`），重试时会先 `status.set({type:"retry", ...})`。
-  5. `catch(halt)`（`:599-625`）：ContextOverflow → 开自动 compaction 或（禁止时）报错退出；普通错误写到 `assistantMessage.error` + `Session.Event.Error`。
-  6. `ensuring(cleanup)`（`:539-597`）：patch 快照、收尾未结束 text/reasoning part、等待 250ms 内工具结算（`:571-575`）、把仍在 `running` 的工具标 `error + interrupted:true`（`:577-593`）——这样下次循环不会误判成待执行。
-
-### 事件 → part 映射（`handleEvent`，`:278-537`）
-
-| LLMEvent | 处理 | 行 |
-|---|---|---|
-| `reasoning-start/delta/end` | 建/更新 `reasoning` part（`reasoningMap` 缓冲，delta 走 `updatePartDelta` 流式），end 时写回最终版 | `:280-313` |
-| `tool-input-start/delta/end` | `ensureToolCall`：不存在则建 `pending` tool part（`{status:"pending", input:{}, raw:""}`） | `:315-329` |
-| `tool-call` | 确保 part 并转 `running`，写入 input、providerMetadata；**doom-loop 检测**（`:358-380`）：最近 3 个 part 全是同一个工具 + 相同输入 → `permission.ask("doom_loop")` | `:331-381` |
-| `tool-result` | 工具已在 AI SDK 内执行完 → 归一化 output（附件图片再 resize）→ `completeToolCall` 写 `completed` part 并 `settleToolCall` | `:383-414` |
-| `tool-error` | `failToolCall`：`status:"error"`；`PermissionV1.RejectedError || Question.RejectedError` → `blocked=true` | `:416-419` |
-| `provider-error` | throw（进 retry） | `:421-422` |
-| `step-start` | 补快照 + `step-start` part（snapshot 字段） | `:424-433` |
-| `step-finish` | **结算**：usage/cost/`finish` 写到 assistant message（`getUsage`，`session.ts:338`），若溢出则 `needsCompaction=true`；快照 patch 写 `patch` part；后台 `summary` | `:435-484` |
-| `text-start/delta/end` | `text` part 流式（delta 走 part-delta 事件）；end 时 `plugin.trigger("experimental.text.complete")`（`:516-524`） | `:486-532` |
-| `finish` | 无操作 | `:534-535` |
-
-`Result` 计算（`:679-682`）：`needsCompaction → "compact"`；`blocked || message.error → "stop"`；否则 `"continue"`。注意 `ctx.shouldBreak=(cfg.experimental?.continue_loop_on_deny!==true)`（`:633`）——被拒权限后默认停。
-
-## 6.5 工具与 Hook：每个环节响应什么
-
-### 6.5.1 工具清单怎么来：`SessionTools.resolve`
-
-`src/session/tools.ts:41-493`：
-
-1. **registry.tools(...)**（`tool/registry.ts:286-335`）过滤出内置+自定义工具：
-   - 按模型做工具替换（`registry.ts:287-298`）：gpt 系用 `patch`，其余用 `edit/write`；websearch 按 flags。
-   - `plugin.trigger("tool.definition", {toolID}, output)`（`registry.ts:313`）——插件可改描述/参数。
-   - task 工具描述会注入可用 subagent 列表（`registry.ts:260-273` `describeTask`）。
-2. 每个工具包成 AI SDK `tool({description, inputSchema, execute})`（`tools.ts:99-133`），**execute 内部**：`tool.execute.before` 钩子 → `item.execute(args, ctx)` → 附件补 `id/sessionID/messageID` → `tool.execute.after` 钩子 → abort 时同步 `completeToolCall`。
-3. **MCP 资源工具**：`list_mcp_resources/list_mcp_resource_templates/read_mcp_resource`（`:136-386`，仅当某 server 有 resources 能力），执行前也 trigger `tool.execute.before` 并 `ctx.ask` 权限（pattern `mcp:<server>:*`）。
-4. **MCP server 暴露的工具**（`:390-490`）：`mcp.tools()` 每条 `item.execute` 包装成 hook + `ctx.ask({permission:key, patterns:["*"], always:["*"]})` + 输出规范化（text/image/resource → text+附件，超限截断）。
-5. `ctx`（工具执行上下文，`:59-90`）：`sessionID/abort/messageID/callID/extra(model,bypassAgentCheck,promptOps)/agent/messages`；`metadata(val)` → `updateToolCall`（允许把 title/metadata 实时写回 part）；`ask(req)` → `permission.ask({...req, tool:{messageID,callID}, ruleset:merge(agent.permission, session.permission)})`——**权限按 agent+会话叠算**。
-
-### 6.5.2 LLM 请求外层的 hook：`LLMRequestPrep.prepare`
-
-`src/session/llm/request.ts:56-206`：
-
-- **system**（`:58-66`）：`[agent.prompt ? ... : SystemPrompt.provider(model), ...input.system, ...(user.system?...)]` ——即 **agent 自有 prompt 或按模型族挑的 system.txt + 上一步的 env/skills/mcp**（`SystemPrompt.provider` 在 `system.ts:27-42` 按 `api.id` 选 `anthropic/gpt/codex/gemini/...txt`）。然后 `plugin.trigger("experimental.chat.system.transform")`（`:69-73`）。
-- **params**（`:114-132`）：`plugin.trigger("chat.params", {sessionID,agent,model,provider,message}, {temperature,topP,topK,maxOutputTokens,options})`——默认来自 `ProviderTransform.*` + agent 覆盖；options 是 `base(provider) ⌢ model.options ⌢ agent.options ⌢ variant` 的 mergeDeep（`:84-99`）。
-- **headers**（`:134-146`）：`plugin.trigger("chat.headers", ...)`，再合并 `opencode` provider 的 `x-opencode-*` 头与 `User-Agent`（`:187-205`）。
-- **工具过滤**（`:148` 与 `resolveTools` `:208-214`）：`user.tools?.[k]!==false` 且未被 permission 禁用（`Permission.disabled`）。
-- provider 适配：OpenAI 系 `strict:false`（`:152-158`）；copilot 空工具但有历史工具调用时塞 `_noop`（`:159-175`）。
-
-### 6.5.3 所有 hook 触发点速查（v1 会话路径）
-
-| Hook | 触发点 |
-|---|---|
-| `config`（加载时改写配置） | `plugin/index.ts:246-254`（server 客户端）；`tui/runtime.ts`（TUI 侧另行） |
-| `event`（全局事件） | `plugin/index.ts:256-264` 订阅 EventV2Bridge |
-| `tool.definition` | `tool/registry.ts:313` |
-| `chat.message` | `prompt.ts:999-1009`（用户消息+parts 已解析后） |
-| `chat.params` | `session/llm/request.ts:114-132` |
-| `chat.headers` | `session/llm/request.ts:134-146` |
-| `experimental.chat.system.transform` | `request.ts:69-73`；`agent.ts:381`（generate/标题路径） |
-| `experimental.chat.messages.transform` | `prompt.ts:1255`（runLoop 每步）；`compaction.ts:350` |
-| `experimental.text.complete` | `processor.ts:516-524`（text-end） |
-| `experimental.session.compacting` / `.autocontinue` | `compaction.ts:343,454` |
-| `tool.execute.before` / `.after` | `tools.ts:107,122,176,209,261,292,339,373,403,420`；`prompt.ts:307,389`（subtask） |
-| `command.execute.before` | `prompt.ts:1460-1464` |
-| `shell.env` | `prompt.ts:554-558`（session.shell）、`pty.ts:71`、`tool/shell.ts:417` |
-| `experimental.provider.small_model` | `provider.ts:1885`（getSmallModel） |
-
-### 6.5.4 会话级别权限
-
-`permission.ask`（`src/permission`）通过事件把 permission request 推给 TUI（`packages/tui/src/routes/session/permission.tsx` 渲染），用户回答 `Permission.Event.Replied` → 工具继续或抛出 `PermissionV1.RejectedError`（→ failToolCall + `blocked`）。
-
-## 6.6 LLM 运行时选择
-
-`src/session/llm.ts`：
-
-- `stream`（`:357-381`）→ `run`（`:85-355`）：并行取 `provider.getLanguage`（§5.7 缓存）、config、provider info、auth。
-- 双运行时：
-  - **native**：`flags.experimentalNativeLlm` 时 `LLMNativeRuntime.stream`（`:226-269`），`unsupported` 时给出原因并回落 AI SDK。
-  - **默认 AI SDK**：`streamText({...})`（`:280-353`）：`temperature/topP/topK/maxOutputTokens` + `providerOptions`（`.providerOptions(...)`）+ `tools` + `toolChoice` + `abortSignal` + `headers` + `messages` + `model: wrapLanguageModel(language, middleware[transformParams])`（`:325-343`，`ProviderTransform.message` 做 provider 特定的 prompt 变换）+ `experimental_repairToolCall`（大小写修复 / 交由 `invalid` 工具，`:296-312`）。
-- `Stream.fromAsyncIterable(result.fullStream)` → `LLMAISDK.toLLMEvents`（`llm/ai-sdk.ts`）归一化为统一的 `LLMEvent` 流（`llm.ts:372-378`）——这是 processor 唯一认识的事件类型。
-
-## 6.7 Thinking 与 Tool-use：并行还是串行？
-
-### 结论先给
-
-| 维度 | 行为 | 证据 |
-|---|---|---|
-| **一次 provider turn 内的多个 tool-call** | **并行**执行（AI SDK `streamText` 对同一步骤的 tool call 并发 dispatch），但结果按事件顺序流回 | `llm.ts:280` `streamText`；各工具 `execute` 是 async，`tools.ts:102-132` |
-| **工具互相之间的串行点** | 只有一个：**权限询问** `ctx.ask`/`permission.ask` 阻塞该工具，直到用户回答（`question/permission` 事件） | `tools.ts:81-89`；被拒 → `failToolCall` + `blocked`（`processor.ts:200-202`） |
-| **provider turn（step）之间** | **串行**：runLoop 每个 `while` 迭代只有一次 `llm.stream`，等完整流结束才决定 continue | `prompt.ts:1272-1286`、`prompt.ts:1334-1335` |
-| **线程内辅助任务** | title/summary/compaction 用 `Effect.forkIn(scope)` **后台并行** | `prompt.ts:1133-1139,1252-1253`、`processor.ts:471-476` |
-| **子代理（task/skill）** | 并行：subtask 任务运行时 **父循环在等待**（`handleSubtask` await task 工具），子 agent 自己跑一套 loop（经 `TaskPromptOps`）；不同会话互不阻塞（`run-state` per session） | `prompt.ts:255-449` |
-| **thinking（reasoning）** | 与文本/工具**几乎同时**：模型在流里先发 reasoning-* 再发 tool/text；处理上是**顺序消费**同一事件流；**delta 流式写入数据库并推送**（对 TUI 可见，collapse 渲染） | `processor.ts:280-313`；TUI `routes/session/index.tsx:1567-1591`（`reasoningSummary` collapse） |
-| **DOOM loop 保护** | 同一工具+相同输入连续 3 次的循环被 `ask("doom_loop")` 打断 | `processor.ts:358-380` |
-
-### 为什么是"流内并行 + 跨 step 串行"
-
-AI SDK 的 `streamText` 会为模型返回的每个 step 的 tool calls 生成 `tool-call` 事件，然后**并发**执行每个 `tool()` 的 `execute`（opencode 的 `execute` 都是纯 promise 回调，无互斥锁），所有 result 以 `tool-result` 流回。因此：
-
-- 模型一次输出 N 个工具调用 → N 个工具**同时跑**（`tools/read + bash + grep` 并行，符合 AGENTS 的"general"设计——**"Execute multiple units of work in parallel"**，`agent.ts` general 描述）。
-- **但**：同一个工具内部依赖只能靠模型自己拆成多个串行 turn（比如 bash 里 `&&` 或"分析→再跑"），opencode 不做工具间依赖调度。
-- 若模型在同一 turn 再要求"看完 A 的结果再决定 B"，历史里 A 的结果必然先于 B 的 decision turn 进入（因为 result 是同步写库的）。你看到的"一步步来"通常是**模型行为**，不是框架锁。
-
-### 安全/清理语义
-
-- 一次 step 结束时 `step-finish` 立即结算 tokens/cost 并写 `patch` part（快照 diff，`processor.ts:435-470`）。
-- 中断（Ctrl-C → `SessionRunState.cancel` → processor 中断）：`cleanup` 正在跑的工具标 `interrupted`，**孤儿工具不会被下次循环当成待办**（`prompt.ts:96-100` `isOrphanedInterruptedTool`；`prompt.ts:1116-1127` 检测退出）。
-- 重试：API 错误按 `SessionRetry.policy`（`session/retry.ts`）指数退避；`context_overflow` 直接切 compaction（`processor.ts:607-617`）。
-
-## 6.8 事件如何回到 TUI（渲染侧）
-
-1. **写入即发布**：`session.ts:631-649` `updateMessage/updatePart` → `EventV2Bridge.publish`（`event-v2-bridge.ts:19-33`：为事件带上 InstanceRef 的 location/project/workspace，并透传到 `GlobalBus`，`:35-61`；v2 durable 事件另发 `sync`）。
-2. **出 server**：worker 的 `GlobalBus.on("event") → Rpc.emit("global.event")`（`cli/tui/worker.ts:24-26`）；外部模式则走 `global.event` SSE（`event` 路由，`server.ts:146-149`）。
-3. **进 TUI**：`context/sdk.tsx:82-117` 订阅，16ms 批量 flush（`:54-80`）→ `context/sync.tsx` 的 `handleEvent`：
-   - `message.updated`：按 id upsert（`:315-354`，超 100 条裁剪）。
-   - `message.part.updated`（`:370-390`）：upsert part。
-   - **`message.part.delta`**（`:392-409`）：对 `text/reasoning` 字段追加 delta——**流式打字机效果**就是这里来的。
-   - `session.status`（`:310-313`）：busy/idle/retry（footer 转圈）。
-4. **首屏加载**：进入 session 路由时 `sync.session.sync(sessionID)`（`sync.tsx:588-661`）：`session.get` + `session.messages({limit:100})` + `session.todo` + `session.diff` 一次性水合，与 delta 事件合并（`tracker` 防覆盖正在进行中的 part）。对话中的部分用事件增量更新，不再回头拉。
-5. **展示**：`routes/session/index.tsx` 把 messages/parts 渲染成列表（text 高亮、tool part 折叠+运行中 spinner、reasoning collapse 见 `thinking.ts`、`message.part.updated` tool 状态切换 plan 模式 `:320-333`）。
-
-## 6.9 一个"完整 turn"的时序（浓缩）
-
-```
-T1  TUI submit                POST /session/:id/message {parts}
-T2  server                   createUserMessage: agent/model/variant/parts → 写库 → chat.message hook
-T3  runLoop step 1           history → system → tools → assistant msg → processor.create
-T4  LLM.stream               LLMRequestPrep: system/params/headers hooks → streamText
-T5  stream 流                reasoning-start → tool-call × N → [N 个工具并行执行]
-                                ├── 每个: tool.execute.before → execute → tool.execute.after
-                                └── 权限 ask: 等待 UI 回答
-                             tool-result × N → step-finish(usage/快照/patch) → text-delta...
-T6  processor              全部事件写库 + EventV2 推送（TUI 实时渲染）
-T7  process 返回 "continue"  → runLoop 下一 step（新 assistant msg → T4 再来）
-    模型不再调用工具         → finish!==tool-calls → break
-T8  compaction.prune        → 返回 lastAssistant → 会话 idle
-```
-
-## 6.10 附：V2 Session Core（迁移中的目标形态）
-
-`packages/core/src/session.ts`（`SessionV2`）+ `packages/server/src/handlers/session.ts` 已接上 v2 协议（`POST /api/session`、`POST /api/session/:id/prompt`，`packages/protocol/src/groups/session.ts:129-224`）：
-
-- **耐久输入先行**：`prompt()` 只做 `SessionInput.admit(db, events, {id,sessionID,prompt,delivery})` 写一条 durable `session_input`（`core/src/session.ts:360-386`），`resume!==false` 时再 `execution.wake(sessionID)` 调度执行；冲突 reuse（`PromptConflictError`/`LifecycleConflict`）精确校验。
-- **执行编排**：`packages/core/src/session/execution/`（`SessionExecution` 进程级、服务 Session-ID；本地实现 `execution/local.ts` + `run-coordinator.ts`：同 Session resume 去重合并、跨 Session 可并行）。
-- **runner**：`packages/core/src/session/runner/*`（含 `max-steps.ts`），序列化 runner 把 admitted input 在安全的 provider-turn 边界推进成可见 user message。
-- AGENTS.md 中"V2 Session Core"一节列出的约束（一个显式 `llm.stream` 调用/每次 provider turn、不桥接 `SessionPrompt.loop`、drain 无持久身份等）就是这套运行的护栏；当前 TUI 仍走 §6.1-6.9 的 v1 路径，迁移中不重复实现。
+> 本课把"一次对话"拆成可理解的阶段：客户端提交 → 输入准入 → 调度 → 组上下文 →
+> 模型调用 → 工具执行 → 步骤结算 → 事件回流。重点是**每个阶段你能扩展什么**。
+>
+> 本课不追求源码行号；需要精确契约时看 `packages/schema/src/session-*.ts`，
+> 需要扩展点时看第 02 课与每节末尾的「扩展点」提示。
 
 ---
 
-## 附：核心文件速查
+## 6.0 时序总览
 
-| 关注点 | 文件 |
+```
+[TUI 输入框 submit]
+  │  乐观插入本地 pending 行
+  ▼
+POST /api/session/:id/prompt
+  │
+  ▼
+Session.prompt
+  ├─ SessionPrompt.prepare       解析附件/agent/skill，跑 session.prompt hook
+  ├─ SessionInbox.admit          写 session_inbox（steer/queue）
+  └─ SessionExecution.wake       门铃（可合并）
+       │
+       ▼
+SessionRunCoordinator            同 Session 单 drain
+       │
+       ▼
+SessionRunner.drain
+  ├─ advanceToStep               边界：move / compaction / 晋升输入
+  ├─ SessionContext.select/load  agent + instructions + tools + model + history
+  ├─ SessionModelRequest         LLMRequest + session.context/model.request hook
+  ├─ SessionStep.attempt         每个 Attempt 一次 llm.stream
+  │    ├─ 事件 → SessionEvent（durable / ephemeral）
+  │    ├─ tool-call → 并发工具 fiber
+  │    └─ step-finish → usage / snapshot / files
+  └─ 继续或结束
+       │
+       ▼
+Bus publish → 投影 + event 行 → SSE → client store → 渲染
+```
+
+---
+
+## 6.1 客户端：回车后发生什么
+
+### 6.1.1 组装输入
+
+`tui/src/component/prompt/index.tsx` 的 `submit(delivery)`：
+
+- 取当前 agent、model、variant；
+- 新会话先创建 session（或使用 `--session` 指定的 ID）；
+- 组装 `text`、`files`、`agents`、`skills`；
+- 根据模式分发：
+
+| 模式 | API | 说明 |
+|---|---|---|
+| 普通 | `data.session.prompt` | 文本 + 附件 + skill/agent 引用 |
+| shell | `client.api.session.shell` | 直接提交 shell 命令 |
+| 斜杠命令 | `client.api.session.command` | 服务端展开 command 模板 |
+| 编辑器选区 | `client.api.session.synthetic` | 作为上下文先准入，`resume: false` |
+
+`delivery` 来自 UI：默认 `steer`，用户可以显式排队（`queue`）。
+
+### 6.1.2 乐观提交
+
+`client/src/solid/data.ts` 的 `session.prompt()`：
+
+1. 立即在 store 插入一条 pending 行（界面马上显示）；
+2. 发出 HTTP；
+3. 失败 → 回滚 pending 行并恢复输入；
+4. 成功 → 等待 `session.inbox.enqueued` / `session.inbox.delivered` 事件替换为真实消息。
+
+这就是"提交不卡 UI"的来源，不是 Web Worker，也不是本地假渲染。
+
+### 6.1.3 为什么输入框在 busy 时仍可用
+
+`tui/src/routes/session/index.tsx` 只在**权限/表单弹窗**时禁用输入。
+模型运行状态不参与 `disabled`。Esc 连按两次是独立的中断命令。
+
+**扩展点**：TUI 插件可以注册命令、slot、面板；它运行在客户端，不参与 server hook。
+
+---
+
+## 6.2 服务端准入：只记录，不执行
+
+`Session.prompt`（`core/src/session/session.ts`）：
+
+```
+get(sessionID)
+messageID = input.id ?? create()
+existing = inbox.reconcile({ id, sessionID, type: "user", delivery })
+  ├─ 已存在且匹配 → 直接返回（幂等）
+  └─ 不存在 → SessionPrompt.prepare(...)
+       ├─ Plugin.awaitActivation
+       ├─ hooks.trigger("session", "prompt", { prompt, metadata, delivery })
+       ├─ materializeAttachment：data: / file: / 目录 / 区间读取
+       ├─ 解析 skills：Skill.get + Skill.prepare（正文 + 文件列表）
+       └─ 返回 user payload
+  → 若有 staged revert → commit
+  → inbox.admit(...)               写 session_inbox，发 inbox.enqueued
+  → if (resume !== false) execution.wake(sessionID)
+```
+
+要点：
+
+- **附件在准入时物化**：文件内容会进入 payload，后续不再依赖客户端；
+- **skill 在准入时展开**：用户 `@skill` 引用会变成 `skill_content` 文本；
+- **hook 可以改写/拒绝输入**：`session.prompt` 是最早的扩展点；
+- **同 ID 重放幂等**：客户端超时重试不会产生两条输入。
+
+`session.prompt` hook 的 event：
+
+```ts
+{
+  sessionID, messageID,
+  prompt: { text, files?, agents?, skills? },
+  metadata?, delivery
+}
+```
+
+你可以在这里追加系统上下文、改 delivery、给输入打标签。
+
+---
+
+## 6.3 调度：门铃与 busy period
+
+`SessionExecution.wake` 委托给 `SessionRunCoordinator`：
+
+- 该 Session 已有执行 → 只置 `pendingWake`（合并）；
+- 空闲 → 启动一个 execution fiber；
+- execution 的开始会写 durable claim（`session.execution.started` + `SessionStore.claim`）；
+- 结束（成功/失败/中断）发布对应终态事件；只有 shutdown 中断保留 claim。
+
+一个 execution 不是"一次模型调用"，而是**一个 busy period**：
+它可以在内部连续跑多个 drain / successor，直到没有待处理工作。
+
+**扩展点**：插件不能直接创建 execution；只能通过 `ctx.session.prompt/synthetic/compact`
+准入工作，或 `ctx.session.interrupt` 中断。这是有意的隔离。
+
+---
+
+## 6.4 Runner：边界决定一切
+
+`SessionRunner.drain` 的核心是 `advanceToStep()`：
+
+```
+每个边界：
+  1. Location 是否关闭？
+  2. 有 move 控制项？ → 关闭 transport，发布 moved，换 Location 重入
+  3. 有 compaction 控制项？ → 执行压缩，发布 started/ended|failed
+  4. 有可晋升输入？ → promote → 写可见消息 → step = 1
+  5. 没有 → Complete（会话将空闲）
+```
+
+晋升范围：
+
+- 首次进入 / 空闲边界：`scope = "input"`，可以晋升一条 queue；
+- 正在连续执行：`scope = "steer"`，只晋升 steer，不越过 compaction/move。
+
+`promote` 的原子性：`session.inbox.delivered` 事件在**同一事务**里
+删除 inbox 行 + 插入消息投影。因此不会出现"显示了两遍"或"删了没显示"。
+
+### 为什么要把输入放在边界
+
+- 不打断正在流的 `llm.stream`，避免半截输出；
+- 一批 steer 只重置一次步数配额；
+- compaction/move 必须优先，否则新输入会落进错误的上下文。
+
+**扩展点**：后台任务、skill、重启提示都走 `synthetic`，因此自动获得同样的边界语义。
+
+---
+
+## 6.5 上下文：每次请求重新解析
+
+`SessionContext.select()` 固定四样东西：
+
+1. **Session**（含 agent、model、permissions、location）；
+2. **Agent**（`Agent.select`，找不到则 `AgentNotFoundError`）；
+3. **Instructions**（有序来源组合）；
+4. **Tool.Snapshot**（按 agent+session 权限过滤）。
+
+`SessionContext.load()` 再解析：
+
+5. **Model**（catalog → runtime，含 variant）；
+6. **History**（`SessionHistory.entriesForRunner`，带 compaction/instruction epoch 感知）。
+
+### Instructions 的顺序
+
+```
+CodeMode catalog
+  → MCP instructions
+  → references
+  → skill guidance
+  → AGENTS.md（InstructionDiscovery）
+  → built-ins
+  → 会话级 instruction entries
+```
+
+从最稳定到最易变，目的是让 provider 的 prompt cache 前缀尽量长。
+
+### 工具快照
+
+`Tool.snapshot(permissions)` 返回本次请求的 definitions + execute。
+请求开始后即使插件重新注册工具，本请求也不会改变；下一次请求才生效。
+
+**扩展点**：
+
+- 加工具：`ctx.tool.transform(editor => editor.add(...))`；
+- 改工具描述/参数：`editor.update(name, tool => ...)`；
+- 按权限隐藏整个工具：`options.permission` + 配置 permission 规则；
+- 改请求级工具列表/描述：`session.context` hook 里的 `event.tools`。
+
+---
+
+## 6.6 请求组装：hooks 的完整链路
+
+`SessionContext.request.primary(...)` → `SessionModelRequest.prepare("primary", ...)`：
+
+```
+1. baseTranscript
+     system = [agent.system ?? 默认模板, instruction 基线]
+     messages = toLLMMessages(历史投影)
+
+2. session.context hook
+     可改 system / messages / tools / options
+     可增删工具定义（但不能凭空执行未广告的工具）
+
+3. outputLimit
+     根据模型窗口、输入估算、compaction 类型算 maxTokens
+
+4. LLM.request(...)
+     headers: session/project/client 标识、affinity、User-Agent
+     promptCacheKey: session affinity
+     messages: 去除不支持的媒体、限制图片总量
+     tools: 过滤后定义
+
+5. session.model.request hook
+     可改 baseURL / headers（例如网关、代理）
+
+6. http.request / http.response
+     每次实际 HTTP 请求的包装（重试也会经过）
+
+7. WebSocket（可选）
+     experimental.ws.handshake / send / receive
+```
+
+**扩展点（开发插件最常用）**：
+
+| 你想做 | 用哪个 |
 |---|---|
-| TUI 启动/同步 | `packages/tui/src/app.tsx`、`context/sdk.tsx`、`context/sync.tsx`、`context/data.tsx` |
-| 发送消息 | `packages/tui/src/component/prompt/index.tsx` |
-| server 入口/实例 | `packages/opencode/src/cli/cmd/tui.ts`、`cli/tui/worker.ts`、`server/server.ts`、`project/bootstrap.ts` |
-| 配置/插件/provider | `src/config/config.ts`、`src/plugin/index.ts`、`src/plugin/loader.ts`、`src/provider/provider.ts` |
-| 会话主循环 | `src/session/prompt.ts`、`src/session/message-v2.ts`、`src/session/session.ts` |
-| 流式处理/工具 | `src/session/processor.ts`、`src/session/tools.ts`、`src/session/llm.ts`、`src/session/llm/request.ts` |
-| 事件桥 | `src/event-v2-bridge.ts` |
-| V2 核心（迁移） | `packages/core/src/session.ts`、`packages/server/src/handlers/session.ts`、`packages/protocol/src/groups/session.ts` |
+| 注入系统提示 | `session.context` 改 `event.system` |
+| 注入历史消息 | `session.context` 改 `event.messages` |
+| 改温度/topP/maxTokens | `session.context` 改 `event.options` |
+| 改 provider 地址/header | `session.model.request` |
+| 观察/改写原始 HTTP | `session.http.request/response` |
+| 改工具定义 | `ctx.tool.transform` 或 `session.context` 的 `tools` |
+| 重试策略 | `session.retry` |
+
+注意：`session.context` 里新增的"工具"必须来自已有的 `Tool.Snapshot`，
+否则执行阶段会因"未广告的工具"被拒绝。正确做法是通过 `tool.transform` 注册。
+
+---
+
+## 6.7 Step：一次逻辑 LLM 调用
+
+`SessionStep.attempt` 的职责：
+
+```
+1. 抓开始快照（Snapshot）
+2. 创建 LLMEvent publisher（写 SessionEvent）
+3. llm.stream(request) 逐事件消费
+     ├─ provider-error 且未开始输出且 overflow → 交给 compaction
+     ├─ 其它事件 → publisher.publish
+     └─ tool-call（非 providerExecuted）→ 启动工具 fiber
+4. 中断 → 中断所有工具 fiber，收尾
+5. 等待工具结算
+6. 计算 usage / snapshot / files
+7. 发布 step ended / failed
+8. 返回 Outcome
+```
+
+### 工具为什么能并行
+
+每个 `tool-call` 都 `Effect.forkScoped` 一个 fiber，交给 `Tool.Snapshot.execute`。
+同一个 step 的多个工具**并发执行**，结果按事件顺序流回。
+跨 step 是串行的：当前 step 的所有工具结算完，才可能进入下一次 `llm.stream`。
+
+真正的串行点只有：
+
+- 权限询问 / question 弹窗（等待用户）；
+- 工具自身内部的依赖（模型需要拆成多个 step）；
+- `toolChoice: "none"`（达到步数上限）。
+
+### 工具执行的扩展点
+
+`Tool.Snapshot.execute` 内部：
+
+```
+tool.execute.before   可改 input，可失败拒绝
+  → 工具 execute
+  → tool.execute.after   可改 result/error
+  → 内容归一化 / 图片缩放 / 输出截断
+```
+
+你的工具应该：
+
+- 用 `Permission.assert` 做自己的授权（工具注册表不做执行授权）；
+- 只把预期错误转成 `ToolFailure`，不要 `catchCause`（中断/defect 必须穿透）；
+- 用 `context.progress` 回报阶段（TUI 会实时显示）；
+- 返回 `{ output, content, metadata }`，让模型和 UI 都有可用信息。
+
+---
+
+## 6.8 事件：从 SQLite 到像素
+
+### 6.8.1 发布
+
+`Bus.publish`：
+
+```
+分配 aggregate seq
+  → 在同一事务里跑 projector（写 session_message / session_inbox / session 表）
+  → 插入 event 行
+  → 提交
+  → PubSub 扇出（durable + ephemeral）
+```
+
+- **durable**：`session.step.*`、`session.tool.*`、`session.inbox.*`、`session.execution.*` 等；
+- **ephemeral**：delta（`session.text.delta`、`session.reasoning.delta`、tool progress），
+  不落库，只用于实时渲染；重连后靠 durable part + 当前消息补齐。
+
+### 6.8.2 传输
+
+- `GET /api/event`：全局 SSE，客户端默认入口；
+- `GET /api/experimental/session/:id/log`：按 `after` 重放 durable 事件；
+- WebSocket：仅 PTY。
+
+客户端连接（`client/src/solid/connection.ts`）：
+
+- 第一帧必须是 `server.connected`；
+- 10ms 批量 flush；
+- 45s 无字节视为 stall（服务端每 15s keepalive）；
+- 断线 1s 退避重连。
+
+### 6.8.3 渲染
+
+`client/src/solid/data.ts` 把事件归并到 store：
+
+| 事件 | 本地动作 |
+|---|---|
+| `session.inbox.enqueued` | 插入 pending 输入 |
+| `session.inbox.delivered` | pending → 真实 user 消息 |
+| `session.step.started` | 新建 assistant 消息 |
+| `session.text.delta` | 追加文本（打字机） |
+| `session.reasoning.delta` | 追加 reasoning（可折叠） |
+| `session.tool.called/success/failed` | 更新工具状态卡 |
+| `session.step.ended` | 写 usage、快照、文件 diff |
+| `session.execution.*` | footer 状态 / 结束条件 |
+
+**扩展点**：TUI 插件可以订阅事件、渲染自定义面板；但不要假设事件顺序之外的状态，
+一切以 store 的最终投影为准。
+
+---
+
+## 6.9 失败、重试与压缩
+
+### 重试
+
+`SessionRunnerRetry`：
+
+- 2s → 10s 指数退避，最多 10 次，带 jitter；
+- 尊重 provider `retryAfterMs`，上限 15 分钟；
+- 超时最多 3 次；
+- 每次决策都过 `session.retry` hook。
+
+### 不完整流
+
+- 已开始输出后中断 → `Continue`：注入"继续，不要重复"的 synthetic，
+  新 assistant 消息接着写；
+- 未开始输出且 `retry-full` → `RecoverFull`：重载上下文后整次重试；
+- provider 返回未知 finish reason → 视为 `incomplete-stream`。
+
+### 压缩
+
+`SessionCompaction.compact({ reason: "auto" | "overflow" | "manual", context })`：
+
+- `auto`：请求前判断窗口，放得下就跳过；
+- `overflow`：provider 拒绝超长，在无可见输出前重建；
+- `manual`：`/compact` 收件箱控制项，边界优先；
+- 失败会发布 `compaction.failed`，不会静默吞掉。
+
+`session.compaction` hook 可以：
+
+- 改压缩请求的 system/messages/options；
+- 直接设置 `result`（`{ summary, providerState?, metadata?, tokens? }`）跳过模型；
+- 观察压缩前后状态。
+
+---
+
+## 6.10 完整时间线（浓缩）
+
+```
+T1  TUI submit
+      data.session.prompt：乐观 pending 行
+
+T2  POST /api/session/:id/prompt
+      Session.prompt → prepare → inbox.admit → wake
+
+T3  Coordinator 启动 execution（或合并 pendingWake）
+      durable claim + session.execution.started
+
+T4  Runner.advanceToStep
+      promote → session.inbox.delivered（同事务插 user 消息）
+      step 重置
+
+T5  SessionContext.select/load
+      agent / instructions / tools / model / history
+
+T6  SessionModelRequest.prepare
+      session.context → LLM.request → session.model.request → http hooks
+
+T7  llm.stream
+      reasoning/text/tool-input 流
+      每个 tool-call → Tool.Snapshot.execute（并发 fiber）
+      tool.execute.before/after
+
+T8  step-finish
+      usage、cost、snapshot、files → session.step.ended
+
+T9  还有工具/续写/steer → 下一个 step
+      否则 advanceToStep → Complete
+      session.execution.succeeded
+
+T10 TUI：SSE → 10ms batch → 消息/工具卡/footer 更新
+```
+
+---
+
+## 6.11 开发插件时最该记住的五件事
+
+1. **输入从 `session.prompt` 进**：不要试图直接改历史；准入是唯一入口。
+2. **工具从 `tool.transform` 注册**：`session.context` 里改定义只影响"广告什么"，
+   执行仍以注册表为准。
+3. **请求用 `session.context` 改**：这是最稳定、最常用的扩展点。
+4. **不要在工具里吞中断/defect**：只把预期错误转成 `ToolFailure`。
+5. **状态以事件为准**：delta 是临时的，durable 事件才是真相。
+
+> **迁移小注**：V1 的 `chat.message`、`chat.params`、`chat.headers`、
+> `experimental.chat.messages.transform`、`processor`、`runLoop` 已删除。
+> V2 对应 `session.prompt` / `session.context` / `session.model.request` 与
+> `SessionStep`。

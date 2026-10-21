@@ -1,161 +1,112 @@
-# 学习资源总结
+# OpenCode V2 源码学习笔记
 
-## 📚 已生成的文档
-
-### 1. 主学习指南
-**文件**: `OpenCode-MultiAgent-Learning-Guide.md` (22KB)
-
-包含 5 个完整课时：
-- 第一课：Agent 系统架构
-- 第二课：Skill 技能系统
-- 第三课：Session 与会话记忆
-- 第四课：Prompt 构造与系统提示词
-- 第五课：Multi-Agent 协作机制
-
-### 2. 深入专题（编号课时）
-- `01-agent-core.md` — Agent 系统核心
-- `02-hook-mechanism.md` — Hook 机制
-- `03-ui-layer.md` — UI 接入层（CLI / TUI / HTTP Server）
-- `04-input-concurrency.md` — 执行中的新输入：会话并发与输入感知机制
-- `05-tui-startup-and-config.md` — 启动链路：命令入口 → server → 配置/插件/provider 装配 → TUI 同步
-- `06-conversation-agent-loop.md` — 一次对话：消息构造 → Agent 循环 → thinking/tool-use 并行与串行 → 事件回流
-- `07-config-loading.md` — 配置加载全景：opencode.jsonc 九层合并、tui.json/cli.json 客户端偏好、状态文件分工（v2）
-- `08-server-client-architecture.md` — Server/Client 架构：职责边界、tool-use 在 server 执行、daemon 多客户端共享、v2 会话执行链路
-- `09-storage-sqlite.md` — 数据存储：全局 SQLite（WAL）、事件溯源落库之旅、表结构、迁移与日常管理
-- `10-service-lifecycle.md` — 后台服务生命周期：daemon 死了怎么被调活——注册文件发现、客户端 ensure/contender 拉起、注册仲裁、停止升级与 PTY 移交、重启后 Session/后台任务恢复（v2）
-- `11-background-task-notify.md` — 后台任务主动唤醒：bash 转后台后的完成通知——Job 持久化、synthetic 消息、inbox 投递与 wake 语义、agent/用户两种唤醒策略（v2）
-- `12-v2-session-core-map.md` — V2 Session Core 知识地图：术语表（step/turn/delivery/claim/wake）、不变式清单、"主动发起"入口总表、compaction 触发、源码阅读路径
-
-> **版本漂移说明**：04/06/08/09 课写作时对应较早的 v2 dev 状态，部分符号已更名——
-> 准入 `SessionInput`（`session/input.ts`）→ `SessionInbox`（`session/inbox.ts`）、
-> 入口 `V2Session.prompt`（`session.ts`）→ `Session.prompt`、注册文件 `server.json` →
-> `service.json`、`serve --register` → `serve --service`。机制描述仍然成立；
-> 以 **10/11/12 课**（及 `packages/core/src/session/` 当前源码）为最新实现口径。
-
-### 3. 代码导航
-**文件**: `code-navigation.md` (8KB)
-
-- 核心目录结构
-- 按主题阅读指南
-- 核心数据流
-- 关键代码片段索引
-
-### 4. 代码示例文档
-**文件**: `code-examples.md` (12KB)
-
-- Agent 定义示例
-- Skill 创建示例
-- Session 操作示例
-- Prompt 构造示例
-- Multi-Agent 协作示例
+> 本目录**只讲 OpenCode V2**（当前仓库 `package.json` 版本 2.0.24）。
+> 所有代码位置以 `packages/core`、`packages/cli`、`packages/server`、`packages/protocol`、
+> `packages/tui`、`packages/client`、`packages/schema` 为准。
+>
+> **V1 仅作一句带过**：V1 运行时（`packages/opencode` 的 `SessionPrompt`、`runLoop`、
+> `session_input` 等）已经从源码树移除，`packages/opencode` 只剩构建产物。
+> 当前仅保留少量兼容代码，主要有 `packages/core/src/v1/config/*`（把旧配置键归一化到 V2）、
+> `packages/core/src/database/v1-migration*`（旧数据导入），以及 CLI 的旧参数桥接
+> （`packages/cli/src/run/v1.ts`）。它们属于迁移/入口细节，不是本教程的阅读对象；
+> 正文只在「迁移/历史」小注里提一句。
+>
+> **写法约定**：以**讲清原理和扩展点**为主，代码只作为佐证与上手示例。
+> 若你主要想开发插件/工具，先读 **02 → 01 → 06**，再直接看 `code-examples.md`。
 
 ---
 
-## 💻 可运行代码项目
+## 📚 课程目录
 
-### 项目位置: `demo-opencode/`
+| 课 | 文件 | 主题 |
+|---|---|---|
+| 总览 | [`OpenCode-MultiAgent-Learning-Guide.md`](./OpenCode-MultiAgent-Learning-Guide.md) | 五条主线速览 + 学习路径 |
+| 01 | [`01-agent-core.md`](./01-agent-core.md) | Agent / Tool / Skill / System Prompt 的 V2 内核 |
+| 02 | [`02-hook-mechanism.md`](./02-hook-mechanism.md) | Plugin 与 Hook：扩展点、注册顺序、执行语义 |
+| 03 | [`03-ui-layer.md`](./03-ui-layer.md) | CLI / TUI / HTTP Server / Client 接入层 |
+| 04 | [`04-input-concurrency.md`](./04-input-concurrency.md) | 执行中的新输入：Inbox、steer/queue、协调器 |
+| 05 | [`05-tui-startup-and-config.md`](./05-tui-startup-and-config.md) | 一次启动：命令 → daemon/standalone → TUI 就绪 |
+| 06 | [`06-conversation-agent-loop.md`](./06-conversation-agent-loop.md) | 一次对话：提交 → 准入 → runner → 流式事件 |
+| 07 | [`07-config-loading.md`](./07-config-loading.md) | 配置全景：来源、发现顺序、`cli.json`、状态文件 |
+| 08 | [`08-server-client-architecture.md`](./08-server-client-architecture.md) | Server / Client 职责、工具执行位置、daemon 共享 |
+| 09 | [`09-storage-sqlite.md`](./09-storage-sqlite.md) | 全局 SQLite、事件溯源、表结构、备份 |
+| 10 | [`10-service-lifecycle.md`](./10-service-lifecycle.md) | 后台服务生命周期：发现、拉起、停止、重启恢复 |
+| 11 | [`11-background-task-notify.md`](./11-background-task-notify.md) | 后台任务完成通知与自动唤醒 |
+| 12 | [`12-v2-session-core-map.md`](./12-v2-session-core-map.md) | V2 Session Core 术语、不变式、入口总表 |
+| 附 | [`code-navigation.md`](./code-navigation.md) | V2 代码地图 |
+| 附 | [`code-examples.md`](./code-examples.md) | V2 API / 插件 / 配置示例 |
 
-### 文件清单 (18 个文件)
+建议顺序：**总览 → 05 → 06 → 04 → 12 → 其余专题**。
+05/06 先把"一次启动 + 一次对话"跑通，04/12 再收口并发与不变式。
 
-| 文件 | 大小 | 说明 |
-|------|------|------|
-| `src/agent/agent.ts` | ~400 行 | Agent 系统核心 |
-| `src/session/session.ts` | ~300 行 | Session 和消息管理 |
-| `src/tool/tool.ts` | ~150 行 | 工具基础定义 |
-| `src/tool/task.ts` | ~250 行 | Task 工具 (Multi-Agent 核心) |
-| `src/skill/skill.ts` | ~200 行 | Skill 系统 |
-| `src/prompt/prompt.ts` | ~150 行 | Prompt 构造 |
-| `src/main.ts` | ~350 行 | 主演示程序 |
-| `examples/single-agent.ts` | ~150 行 | 单 Agent 示例 |
-| `examples/multi-agent.ts` | ~200 行 | Multi-Agent 示例 |
-| `examples/skill-demo.ts` | ~200 行 | Skill 系统示例 |
-| `verify.ts` | ~150 行 | 验证脚本 |
-| `README.md` | 详细说明 | 项目文档 |
-| `GUIDE.md` | 使用指南 | 详细使用说明 |
-| `install.sh` | 安装脚本 | 一键安装 |
-| `package.json` | 项目配置 | Bun 项目 |
+### 想开发插件 / Tool？走这条
 
----
-
-## 🚀 快速开始
-
-### 1. 进入项目目录
-```bash
-cd /home/peter/project/learn-opencode/demo-opencode
+```
+02（Transform / Hook / 加载顺序）
+  → 01（Agent / Tool / Skill 的数据结构）
+  → 06（一次请求里 hook 的触发位置）
+  → code-examples.md（最小可运行骨架）
+  → 按需回查 05（启动） / 07（配置） / 09（持久化）
 ```
 
-### 2. 安装依赖
-```bash
-./install.sh
-# 或
-bun install
+不要在没读 02 的情况下直接抄旧版 `Hooks` 接口——V1 的 hook 名称已经全部改名。
+
+---
+
+## 🧭 先记住这张分层图
+
+```
+@opencode/schema     纯协议/存储契约（无运行时行为）
+        ▲
+        ├── @opencode/protocol   HTTP HttpApi 定义（/api/*）
+        │           ▲
+        │           └── @opencode/server   协议 → Core handler 绑定
+        │
+        └── @opencode/core      领域运行时（SQLite、Session、Runner、Tool…）
+                    ▲
+                    ├── @opencode/cli       命令 + TUI 宿主
+                    ├── @opencode/tui       Solid/OpenTUI 界面
+                    └── @opencode/client    浏览器安全的客户端运行时
 ```
 
-### 3. 运行验证
+依赖方向是硬规则：**client 只能依赖 schema / protocol，不能依赖 core / server**。
+`packages/sdk-next` 才把 client + core + server 组装在一起。
+
+---
+
+## ▶️ 本地跑起来
+
 ```bash
-bun run verify.ts
+# 默认 TUI（连接当前安装的 opencode 后台服务）
+bun run dev:live
+
+# 指定项目目录
+bun run dev:live /path/to/project
+
+# 只看 CLI 非交互输出
+bun run dev -- run "解释这个仓库的目录结构"
+
+# 起一个前台 server（不做服务发现）
+bun run dev -- serve
 ```
 
-### 4. 运行主演示
-```bash
-bun run src/main.ts
-```
-
-### 5. 运行独立示例
-```bash
-bun run examples/single-agent.ts   # 单 Agent
-bun run examples/multi-agent.ts    # Multi-Agent
-bun run examples/skill-demo.ts     # Skill 系统
-```
+`dev:live` 会自动读取 `opencode service status` / `opencode service get password`，
+让开发中的 TUI 连上正在运行的 daemon。后台服务生命周期见第 10 课。
 
 ---
 
-## 📊 代码统计
+## ✅ 读代码时的三个提醒
 
-| 类别 | 行数 | 文件数 |
-|------|------|--------|
-| 核心实现 | ~2000 行 | 6 个 |
-| 示例代码 | ~500 行 | 3 个 |
-| 工具脚本 | ~300 行 | 2 个 |
-| 文档 | ~5000 行 | 6 个 |
-| **总计** | **~7800 行** | **17 个** |
+1. **先看 `packages/core/src/session/`**：`inbox.ts` → `run-coordinator.ts` →
+   `execution.ts` → `runner/llm.ts` → `runner/step.ts`，这是 V2 的心脏。
+2. **不要用行号定位**：V2 迭代很快，本目录优先引用**文件 + 导出名/函数名**。
+3. **看到 `v1/` 目录可以跳过**：那是配置/数据迁移兼容层，不属于现行运行时。
 
 ---
 
-## 🎯 学习建议
+## 🔗 参考
 
-### 第 1 天 - 理解概念
-1. 阅读 `OpenCode-MultiAgent-Learning-Guide.md` 前 3 课
-2. 运行 `bun run src/main.ts`
-3. 阅读 `src/agent/agent.ts`
-
-### 第 2 天 - 深入实现
-1. 阅读指南后 2 课
-2. 研究 `src/tool/task.ts`
-3. 研究 `src/session/session.ts`
-
-### 第 3 天 - 动手实践
-1. 运行所有示例
-2. 创建自定义 Agent
-3. 创建自定义 Skill
-
----
-
-## 🔗 参考资源
-
-- **OpenCode 源码**: https://github.com/anomalyco/opencode.git
-- **Bun 文档**: https://bun.sh/docs
-- **Zod 文档**: https://zod.dev
-
----
-
-## 💡 下一步
-
-1. 运行主演示程序体验完整功能
-2. 按照 GUIDE.md 中的实验进行扩展
-3. 阅读真实 OpenCode 源码对比实现
-4. 尝试在自己的项目中应用这些概念
-
----
-
-**所有文件已准备就绪，可以开始学习！ 🎉**
+- 仓库源码：当前工作区（`packages/*`）
+- 根约束：`AGENTS.md` 的 **V2 Session Core** 一节
+- 协议契约：`packages/schema/src/session-*.ts`、`packages/protocol/src/groups/*.ts`
+- Effect 文档：https://effect.website

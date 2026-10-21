@@ -1,199 +1,261 @@
-# 4. 执行中的新输入：会话并发与输入感知机制
+# 04. 执行中的新输入：Inbox、steer/queue 与协调器
 
-## 4.1 场景与要回答的问题
+> 本课回答：模型还在流式输出时，用户又提交了一条输入，会发生什么？
+> 输入怎么被"高效"读到？为什么不会丢、不会叠循环、也不会打断正在流的调用？
+>
+> V1 的 `Runner.ensureRunning` + `join` 已经删除。V2 只有一条链路：
+> **准入（admit）→ 门铃（wake）→ 协调器（coordinator）→ runner 边界晋升**。
 
-使用 TUI 时最常见的交互：**模型还在流式输出（上一个问题正在执行），用户又按回车提交了新输入**。
-opencode 既不会丢掉新输入，也不会让界面卡住。本章梳理两条主线：
+---
 
-1. **输入感知**：键盘输入是如何被"高效"读到的？是 epoll 吗？
-2. **会话并发**：新输入到达时，正在执行的循环/流怎么处理它（接着干、排队、还是打断）？
+## 4.1 结论先给
 
-结论先放在前面：
+- opencode **业务代码里没有 epoll/select/poll 调用**。键盘感知是
+  `process.stdin` 的 `"data"` 事件；epoll 是 Bun 运行时在 Linux 下的 I/O 多路复用实现。
+- 客户端提交输入**不阻塞**：TUI 先乐观插入本地行，HTTP 发出后立即返回输入循环。
+- 服务端把输入写进 durable `session_inbox` 行，然后只按一次"门铃"。
+- 同一 Session 同时只有一个执行 fiber（drain）；运行中的 wake 合并成 `pendingWake`。
+- `steer` 在下一个安全 step 边界晋升；`queue` 等到会话将要空闲时一次晋升一条。
+- 真正打断流只有 `POST /api/session/:id/interrupt`（TUI 里 Esc 连按两次）。
 
-- opencode **业务代码里没有任何 epoll/select/poll 调用**。"高效感知"的最后一公里是 **Bun 运行时在 Linux 上用 epoll 做 I/O 多路复用**（键盘 stdin、网络 socket、子进程、定时器都挂在同一事件循环上）；opencode 自己只做"事件驱动"的注册与分发。
-- 新输入的处理分两条服务端链路：**v1（legacy `SessionPrompt`，当前 HTTP 端点默认）用 Runner 的 join**，**v2（`SessionV2`）用"落盘 + 协调器 wake"**，二者都不依赖 UI 线程。
+---
 
-## 4.2 进程架构：输入与执行分离到两个线程
-
-`opencode` 编译为 Bun 原生二进制（`packages/opencode/script/build.ts:168` 的 `Bun.build` + `compile`）。TUI 模式运行时拆成两个线程：
+## 4.2 进程与线程
 
 ```
-┌─ 主线程：TUI ──────────────────┐   ┌─ Worker 线程：Server ───────────────┐
-│                                │   │                                    │
-│  渲染（@opentui + Solid.js）     │   │  HTTP 应用（Effect HttpApiBuilder） │
-│  读键盘（process.stdin）         │   │  v1: SessionPrompt.loop()          │
-│  SDK client（fetch 代理）       │RPC│  v2: SessionV2 / SessionExecution   │
-│  createWorkerFetch()           │◀─▶│  rpc.fetch / rpc 方法                │
-│  createEventSource()           │   │  GlobalBus → global.event 推送       │
-└────────────────────────────────┘   └─────────────────────────────────────┘
+┌─ 客户端进程 ───────────────────────────┐   ┌─ Server 进程 ──────────────────────┐
+│ TUI 渲染 + 键盘 (Bun 事件循环)          │   │ HTTP + Core 服务图                 │
+│ client: fetch / SSE / 乐观 store        │──▶│ SessionInbox → Coordinator →       │
+│                                         │SSE│ Execution → Runner → llm.stream    │
+└─────────────────────────────────────────┘   └────────────────────────────────────┘
 ```
 
-- 启动：`packages/opencode/src/cli/cmd/tui.ts:210` 里 `new Worker(target())` 起 server worker，再 `run({ url: "http://opencode.internal", ... })` 跑 TUI。
-- 默认模式**没有 OS socket**：`packages/opencode/src/cli/tui/worker.ts:30` 的 `rpc.fetch` 直接调 `Server.Default().app.fetch(request)`，TUI 侧用 `createWorkerFetch`/`createEventSource`（`tui.ts:24-50`）把 fetch/SSE 模拟成进程内 RPC。
-- 只有 `--port`/`--hostname` 才走真实网络：`packages/opencode/src/server/server.ts:200` 的 `node:http.createServer`。
+- 本地默认连**共享 daemon**；`--standalone` 或 `--server` 则换 endpoint（第 10 课）。
+- 模型推理与工具执行都在 server 进程；客户端只消费事件。
+- 因此即使 server 很忙，TUI 的键盘/渲染仍在自己的进程里。
 
-好处：即使模型推理 / 工具执行再阻塞 worker 线程，主线程的**渲染和输入依旧流畅**（RPC 是异步消息）。
+---
 
 ## 4.3 输入感知：事件驱动，不是轮询
 
-### 4.3.1 键盘到事件的两段式
-
 ```
-键盘按键 → 内核 TTY 缓冲
-        → Bun 事件循环就绪回调（Linux 底层 = epoll）
-        → process.stdin 触发 "data" 事件
-        → @opentui/core 的 CliRenderer.stdinListener
-        → StdinParser 解析转义序列（普通键 / 方向键 / 鼠标 / 括号粘贴）
-        → 派发 KeyEvent / MouseEvent / PasteEvent
-        → 路由到 Solid.js 组件或 keymap 命令
-```
-
-- 感知层在 `@opentui/core`：`CliRenderer` 构造时 `this.stdin.on("data", handler)`，handler 把字节 `push` 进 `StdinParser`（`ByteQueue` + 转义序列状态机），解析出结构化事件。
-- 这是**事件驱动**：有字节才执行，没有输入时事件循环挂起，不空转、不轮询。
-- **epoll 的真实位置**：opencode 跑在 Bun 的事件循环上，Bun 在 Linux 下用 epoll 做 I/O 多路复用。所以严格说是"**Bun 用 epoll**"，opencode 源码里没有系统调用级别的代码。
-
-### 4.3.2 渲染的批处理与帧输出
-
-即使 `llm.stream` 每秒吐成百上千个 token 事件，界面也不会逐字符重绘：
-
-- **16ms 批量 flush**：`packages/tui/src/context/sdk.tsx:68-80` 的 `handleEvent` 把事件先入队，若距上次 flush 不足 16ms 就等定时器一起 `batch()` 提交，一次触发所有 store 更新 → 每帧最多一次重渲染。
-- **帧渲染 + diff**：renderer 按 `targetFps: 60` 出帧，只向终端写差异。
-- **SSE 重连退避**：`sdk.tsx:112-114`，断线按指数退避（1s → 30s）重连，事件流不丢。
-
-### 4.3.3 输入框在 busy 时保持可用
-
-`packages/tui/src/routes/session/index.tsx:236`：`disabled` 只在**权限/提问弹窗**时置真；模型 busy 时输入框照常可输入、可提交。提交走 `packages/tui/src/component/prompt/index.tsx:1093` 的 `sdk.client.session.prompt(...)`，且是 **fire-and-forget**（`.catch()` 不 await），所以提交后渲染循环立即恢复响应。
-
-打断是另一条独立路径：`prompt/index.tsx:407-418` 按 Esc（5 秒内连按两次）→ `store.interrupt >= 2` → `sdk.client.session.abort({ sessionID })` → 服务端中断当前 run。
-
-## 4.4 服务端 v1：Runner 的 join（当前默认）
-
-HTTP 端点 `POST /session/:id/prompt` 默认走 legacy `SessionPrompt`。
-
-调用链与并发语义：
-
-```
-SessionHttpApi.prompt (handlers/session.ts:295)
-  └─ SessionPrompt.prompt (session/prompt.ts:1052)
-       ├─ revert.cleanup(session)
-       ├─ createUserMessage(input)          # ① 先持久化 user 消息
-       └─ loop({ sessionID })               # ② 请求执行
-            └─ RunState.ensureRunning       # (run-state.ts:88)
-                 └─ Runner.ensureRunning    # (effect/runner.ts:115)
+键盘按键
+  → TTY 缓冲
+  → Bun 事件循环可读回调（Linux 底层 epoll）
+  → process.stdin 触发 "data"
+  → @opentui/core CliRenderer 的 stdin 监听
+  → StdinParser 解析转义序列（普通键 / 方向键 / 鼠标 / 括号粘贴）
+  → KeyEvent / MouseEvent / PasteEvent
+  → Solid 组件或 keymap 命令
 ```
 
-`Runner.ensureRunning` 的状态机（`Idle / Running / Shell / ShellThenRun`）：
+- 有字节才执行；空闲时事件循环挂起，不空转。
+- **opencode 源码里没有系统调用级别的多路复用代码**；epoll 属于 Bun。
+- 渲染不是逐 token 重绘：客户端把 SSE 事件按 **10ms** 批量 flush
+  （`client/src/solid/connection.ts` 的 `flushInterval`），一帧内合并 Solid 更新；
+  renderer 目标 60fps。
 
-| 当前状态 | 新 prompt 的行为 |
-|---------|-----------------|
-| `Idle` | 启动一个新 run fiber（`startRun`） |
-| `Running` | **join**：`awaitDone(st.run.done)`，不另起循环，等现有循环结束 |
-| `Shell` | 先挂起为 `ShellThenRun`，shell 结束再启动 run |
-| `ShellThenRun` | join |
+### 输入框在 busy 时仍可用
 
-关键点：**普通 prompt 永远不会拒绝**。正在跑的 `runLoop`（`prompt.ts:1081`）每轮迭代都从 DB 重新读消息（`MessageV2.latest`），所以新 user 消息会在**下一个迭代边界**（当前 provider turn / 工具结果结算完）被看见，循环继续而不是退出——即"接着干"。
+`tui/src/routes/session/index.tsx`：
 
-- 副作用：`session.prompt` 这个 HTTP 请求会一直挂着，直到整轮循环彻底结算才返回；TUI 不 await 它，所以无感知。
-- 只有 `shell` / `revert` 等需要互斥的操作才用 `assertNotBusy` / `mapBusy` 拒绝，返回 `SessionBusyError`（409）。
-
-## 4.5 服务端 v2：落盘 + 协调器 wake（新核心）
-
-v2 把"输入准入"与"模型执行"彻底分离。核心文件在 `packages/core/src/session/`。
-
-### 4.5.1 准入（admit）即返回
-
-> **当前实现更新**：准入/收件箱已从早期的 `SessionInput`（`session/input.ts`）演进为
-> `SessionInbox`（`packages/core/src/session/inbox.ts`）+ `session_inbox` 表，入口统一在
-> `Session.prompt` / `Session.synthetic`（`packages/core/src/session/session.ts`）。
-> 术语与本节一致（delivery steer/queue、幂等 admit、advisory wake）；
-> 投递边界的最新细节见第 4.5.3、第 11 课。
-
-`V2Session.prompt`（`packages/core/src/session.ts:360`）：
-
-```
-prompt(input)
-  ├─ result.get(sessionID)              # 会话必须存在
-  ├─ resolvePrompt(input.prompt)
-  ├─ SessionInput.admit(db, events, …)  # ① 持久化一行 session_input（delivery: steer|queue）
-  ├─ 校验 admitted 与请求等价，否则 PromptConflictError
-  └─ execution.wake(sessionID)          # ② 触发一次"协调"（resume !== false 时）
+```ts
+const disabled = createMemo(() =>
+  promptedPermissions().length > 0 || forms().length > 0,
+)
 ```
 
-`SessionInput.admit`（`packages/core/src/session/input.ts:41`）通过 `SessionEvent.PromptAdmitted` 事件拿到聚合序列号后**立即返回** admitted 记录，不等执行。同 ID 重放返回已 admit 的记录（幂等）。
+即只有**权限/表单弹窗**会禁用输入；模型运行中照常输入、照常提交。
+提交走 `data.session.prompt()` 的乐观路径，不 await 网络。
 
-### 4.5.2 协调器：wake 合并 + successor drain
+打断是独立命令：Esc 连按两次 → `client.api.session.interrupt({ sessionID })`
+（`component/prompt/index.tsx` 的 `session.interrupt`）。
 
-`SessionExecution` 是进程级、按 Session ID 的服务；本地实现 `packages/core/src/session/execution/local.ts` 把它接到 `SessionRunCoordinator`（`run-coordinator.ts`）。
+---
 
-- `wake`（`run-coordinator.ts:81`）：若该 Session 正在执行，只置 `pendingWake = true`——**多次唤醒 coalesce 成一次**；若空闲，直接起一个 drain。
-- `settle`（`run-coordinator.ts:51-65`）：当前 drain 结束后，若 `pendingWake` 且未被 stop，用 `successor = true` 起**下一个 drain**（`Effect.yieldNow` 之后立刻开始），实现"接着跑"。
-- 每个 Session 同时只有**一个** drain，不同 Session 可并行。
+## 4.4 准入：`Session.prompt` 只落库
 
-### 4.5.3 drain 内：安全边界提升输入
-
-`SessionRunner.run`（`packages/core/src/session/runner/llm.ts:383`）：
+`packages/core/src/session/session.ts`：
 
 ```
-run(sessionID, force)
-  ├─ hasPending("steer") ? promotion="steer" : hasPending("queue") ? "queue" : undefined
-  ├─ while shouldRun:
-  │    ├─ while needsContinuation:                    # 一个 provider turn
-  │    │    └─ runTurn(sessionID, promotion, step)    # 每次只调一次 llm.stream()
-  │    │        ├─ promotion 时：promoteSteers / promoteNextQueued（在 cutoff 内提升）
-  │    │        ├─ 重载投影历史 SessionHistory.entriesForRunner
-  │    │        └─ 结算工具、持久化事件
-  │    │    └─ needsContinuation ||= hasPending("steer")
-  │    └─ shouldRun = hasPending("queue")              # 会话将空闲时提升一个 queue
+prompt(sessionID, input)
+  ├─ get(sessionID)
+  ├─ messageID = input.id ?? new
+  ├─ existing = SessionInbox.reconcile(...)        // 同 ID 重放 → 幂等
+  ├─ SessionPrompt.prepare(...)                    // 解析文件/agent/skill，跑 session.prompt hook
+  ├─ 若有 staged revert → commit
+  ├─ SessionInbox.admit({ id, sessionID, item })   // 写 session.inbox.enqueued
+  └─ if (resume !== false) execution.wake(sessionID)
 ```
 
-投递语义（对应 `delivery` 字段）：
+`SessionInbox.admit`（`session/inbox.ts`）：
 
-- **`steer`（默认）**：在**下一个安全 provider-turn 边界**提升全部 pending steers；一批 steers 只重置一次步数上限。**不会打断正在流的 `llm.stream`**，只是下个 turn 把新消息纳入投影历史。
-- **`queue`**：保持 pending，直到会话即将空闲时才提升**一个**，随后重新评估是否继续，再决定是否提升下一个。
+- 通过 `Bus.publish(SessionEvent.InboxEnqueued)` 拿到聚合 seq；
+- 同一事务里投影插入 `session_inbox` 行；
+- 立即返回，**不等模型**；
+- 同 Session + 同类型的同 ID 重放返回已有条目（首次准入获胜）；
+- 跨 Session / 跨类型复用 ID → `LifecycleConflict` → `PromptConflictError`。
 
-要真正打断流，只能走 `V2Session.interrupt` → `execution.interrupt`（`run-coordinator.ts:94`）：中断当前 drain 的 fiber；空闲或缺失时是 no-op（幂等）。
+`synthetic` 走同一条路：`type: "synthetic"`，用于后台完成通知、重启提示、
+skill 内容、Plan 模式提醒等。`resume: false` = 只准入、不响铃。
 
-## 4.6 一次完整时序：模型运行中用户提交新输入
+---
+
+## 4.5 协调器：一个 Session 一个 busy period
+
+`session/run-coordinator.ts`：
+
+```
+wake(key, scope)
+  ├─ 已有 execution → pendingWake = 合并（scope 取更宽的 "input"）
+  └─ 空闲 → start(key, force=false, scope)
+
+run(key)                 // 显式 resume：空闲则起，运行中则等待同一次执行结束
+  └─ 返回该 execution 的 exit
+
+interrupt(key)
+  ├─ 空闲/正在停止 → false
+  ├─ 标记 stopping，清掉此前的 pendingWake
+  └─ fork Fiber.interrupt(owner)，立即返回
+```
+
+一个 execution 内部是：
+
+```
+loop:
+  drain(key, force, scope)
+  若 stopping 或没有 pendingWake → 结束
+  否则取走 pendingWake，yieldNow 后继续 drain
+```
+
+- 不同 Session 的 execution 并行；
+- 同一 Session 的多次 wake **coalesce**；
+- 若 wake 发生在 drain 已经决定结束之后，`settle` 会启动 successor execution；
+- `started` / `settled` 钩子负责写 durable claim 与终态事件（第 10 课）。
+
+---
+
+## 4.6 Runner：在安全边界晋升输入
+
+`session/runner/llm.ts` 的 `drain`：
+
+```
+advanceToStep():
+  while true:
+    ├─ Location 关闭 → Reloaded/return
+    ├─ 取 pending（进入/空闲边界 scope="input"，step 中 scope="steer"）
+    ├─ 遇到 move → 关闭 transport、发布 Moved、返回 Moved
+    ├─ 遇到 compaction → 执行压缩、发布 Started/Ended|Failed、continue
+    ├─ 没有可晋升输入 → Complete
+    ├─ prepareContext + SessionInbox.promote
+    │    ├─ 成功晋升 > 0 → step 重置为 1
+    │    ├─ 首次无标题会话 → 后台生成 title
+    │    └─ 重新加载 SessionContext
+    └─ 返回 Ready → runStep
+```
+
+### 晋升规则
+
+`SessionInbox.promote(db, bus, sessionID, scope)`：
+
+- 先取所有 pending **steer**；
+- 遇到第一个 `compaction` / `move` 控制项就停下，不越过；
+- 若第一条就是控制项 → 返回 `undefined`，由 runner 先处理控制项；
+- `scope === "steer"` 时**绝不动 queue**；
+- `scope === "input"` 且没有 steer 时，只晋升**一条** queue；
+- 每次晋升通过 `session.inbox.delivered` 事件在**同一事务**里：
+  删除 inbox 行 + 插入可见消息；
+- 晋升成功后 `step = 1`，重置该 agent 的步数配额。
+
+### 两种投递
+
+| delivery | 语义 | 适用 |
+|---|---|---|
+| `steer`（默认） | 下一个 step 边界插队；不打断当前 `llm.stream` | 用户追加、后台完成通知 |
+| `queue` | 会话将要空闲时才晋升一条 | 用户明确排队、不希望插队 |
+
+`session_inbox` 只存**未消费**工作；一旦 delivered 就变成消息行。
+
+---
+
+## 4.7 中断
+
+```
+TUI Esc×2
+  → POST /api/session/:id/interrupt
+  → Session.interrupt
+  → SessionExecution.interrupt
+  → coordinator.interrupt
+       ├─ 标记 stopping
+       ├─ 清掉 pendingWake（属于被中断的意图）
+       └─ Fiber.interrupt(execution fiber)
+  → runner/step 收尾：
+       ├─ 进行中的工具 fiber 被中断
+       ├─ 未结算工具写 Tool.Failed(aborted)
+       ├─ assistant 标记 interrupted
+       └─ 发布 session.execution.interrupted
+```
+
+- 中断是 fire-and-forget：接口立即返回，清理异步完成；
+- `options.resume` 可在中断后按剩余的 steer 输入起 successor（默认不 resume）；
+- 空闲 Session 的 interrupt 是 no-op；未知 Session 由公共 API 报错。
+
+---
+
+## 4.8 完整时序：运行中追加输入
 
 ```
 用户按回车
   │
-  ├─ TUI: sdk.client.session.prompt({...})  (fire-and-forget)
-  │        └─ createWorkerFetch → RPC fetch → worker 线程
+  ├─ TUI data.session.prompt()
+  │    ├─ 同步插入本地 pending 行
+  │    └─ POST /api/session/:id/prompt（不 await 渲染）
   │
-  ├─ Server:
-  │   v1:  createUserMessage() 落库
-  │        loop() → Runner.ensureRunning → join 现有 run
-  │        正在跑的 runLoop 下轮迭代看到新 user 消息 → 继续，不退出
+  ├─ Server Session.prompt
+  │    ├─ SessionPrompt.prepare（文件/agent/skill/hook）
+  │    ├─ SessionInbox.admit → session_inbox 行 + InboxEnqueued
+  │    └─ execution.wake
+  │         └─ 已有 execution → pendingWake = steer（合并）
   │
-  │   v2:  SessionInput.admit() 落库（delivery=steer）
-  │        execution.wake() → coordinator.pendingWake=true（合并）
-  │        当前 turn 结算 → successor drain → 提升 steers → 下个 turn 生效
+  ├─ 当前 step 的 llm.stream 继续，不被打断
   │
-  └─ TUI 渲染：SSE/global.event 批量(≤16ms) → batch() → 一帧重绘
+  ├─ step 结算（Tool.Success/Failed、Step.Ended）
+  │
+  ├─ advanceToStep: scope=steer → promote 这条输入
+  │    └─ InboxDelivered：删 inbox 行 + 插 user 消息（同事务）
+  │
+  ├─ 下一次 llm.stream 的历史里已经包含新输入
+  │
+  └─ TUI：SSE 事件批量 flush → 消息从 pending 变为真实行
 ```
 
-用户想打断（Esc ×2）：
-```
-TUI: sdk.client.session.abort({ sessionID })
-  ├─ v1: RunState.cancel → Runner.cancel → Fiber.interrupt → onInterrupt（标记 assistant 消息 aborted）
-  └─ v2: V2Session.interrupt → execution.interrupt → 中断当前 drain fiber
-```
+抢在 `advanceToStep` 决定 Complete 之后到达的输入，会由 coordinator 的
+`settle → successor` 接住，不会丢。
 
-## 4.7 常见误区：epoll
+---
 
-- **opencode 没有直接调用 epoll**。仓库里搜不到 `epoll/select/poll/io_uring` 的调用。
-- 键盘感知 = `process.stdin` 的 `"data"` 事件，是**事件驱动**，不是轮询。
-- epoll 是 **Bun 运行时**在 Linux 下的实现细节：Bun 的事件循环（stdin、socket、timer 共用一个 loop）用 epoll 做 I/O 多路复用；macOS 则是 kqueue。
-- 默认本地模式 TUI↔server 是进程内 RPC，**根本不经过 OS socket**，连 epoll 都不涉及；只有 `--port` 模式走真实 `node:http`（同样是 Bun 的 loop 托管）。
+## 4.9 常见误区
 
-## 4.8 设计要点小结
+| 误区 | 事实 |
+|---|---|
+| "opencode 自己用 epoll 读键盘" | 没有；是 Bun 事件循环 + `stdin.on("data")` |
+| "新输入会打断当前流" | 不会；只在 step 边界晋升，除非显式 interrupt |
+| "wake 等于开始执行" | wake 只是门铃；执行由 coordinator 决定 |
+| "queue 会在当前 step 后立刻跑" | 不会；queue 只在会话将要空闲时晋升一条 |
+| "inbox 行是历史的一部分" | 不是；它只存未消费工作，delivered 后变成消息 |
+| "提交要等 server 返回才显示" | TUI 是乐观插入，失败才回滚 |
 
-| 关注点 | 机制 | 位置 |
-|--------|------|------|
-| 输入不阻塞渲染 | 单线程事件循环，非阻塞 `stdin.on("data")` | `@opentui/core` CliRenderer |
-| token 洪泛不重绘 | 16ms 批量 flush + `batch()` + 60fps 帧渲染 | `packages/tui/src/context/sdk.tsx` |
-| 执行不拖累 UI | server 放 Worker 线程，RPC 异步 | `cli/tui/worker.ts` |
-| 新输入不丢 | v1 先落 user 消息再 join；v2 先落 `session_input` 再 wake | `session/prompt.ts` / `core/session/input.ts` |
-| 新输入不叠循环 | v1 `Runner` 状态机 join；v2 协调器单 drain + `pendingWake` 合并 | `effect/runner.ts` / `core/session/run-coordinator.ts` |
-| 打断唯一入口 | Esc×2 → `session.abort` → fiber interrupt | `prompt/index.tsx` |
+---
+
+## 4.10 小结
+
+1. **输入不阻塞**：客户端乐观提交 + SSE 增量渲染。
+2. **准入与执行分离**：`session_inbox` 是唯一入口，wake 是 advisory。
+3. **一个 Session 一个 drain**：协调器串行化同会话，允许跨会话并行。
+4. **边界晋升**：steer 在 step 边界、queue 在空闲边界；控制项优先且不可越过。
+5. **中断独立**：只有 `interrupt` 会停止正在流的调用。
+6. **不丢、不重、可恢复**：inbox 行、投影、claim 都在 SQLite。
+
+> **迁移小注**：旧资料里的 `session_input`、`promoted_seq`、`Runner.ensureRunning`、
+> `RunState` 都是 V1；V2 对应 `session_inbox`、`enqueued_seq`、
+> `SessionRunCoordinator` / `SessionExecution`。

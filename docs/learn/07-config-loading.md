@@ -1,228 +1,312 @@
-# 7. 配置加载全景：何时、何地、哪些文件、谁覆盖谁
+# 07. 配置加载全景：来源、优先级与三类数据
 
-> 本课把 v2 的"配置"彻底摊开：配置在哪个进程、哪个时刻加载；`opencode.jsonc`、`tui.json`/`cli.json`、各种状态文件各自的分工；9 层合并顺序的权威表格；以及 v2 原生配置的降级（lowering）机制。承接第 5 课 §5.4（启动链路中的配置装配），本课是配置专题的完整版。
+> 本课回答：V2 的配置到底分几种？`opencode.jsonc` 从哪里读、谁覆盖谁？
+> `cli.json` 是什么？`model.json` / `service.json` 算配置吗？
+> 以及**开发插件时应该读写哪一类**。
 >
-> **版本对照**：本仓库 `dev` 分支与官方 v2.0.7 release 在文件命名上有少量漂移（`tui.json` → `cli.json`、`server.json` → `service.json`），文中会逐处标注。机制本身一致。
+> V1 的 `ConfigV1.Info` 九层深合并、`tui.json`、`server.json` 已经不是现行概念；
+> 现在只有 V2 原生配置 + 迁移归一化。
 
-## 7.0 先分清三个世界：配置、偏好、状态
+---
 
-很多人把"配置"混成一团，实际上 v2 里有三类持久化数据，**加载的进程、时机、方式完全不同**：
+## 7.0 先分清三个世界
+
+| 类别 | 文件 | 加载方 | 影响 |
+|---|---|---|---|
+| **① Server 配置** | `opencode.json` / `opencode.jsonc` | Core 的 `Config.Service`（按 Location） | agent、model、provider、MCP、permission、plugin、tool… |
+| **② 客户端偏好** | `cli.json` | CLI/TUI 进程 | 主题、keymap、鼠标、滚动、diff 展示 |
+| **③ 运行状态** | `model.json`、`service.json`、`auth` / credential DB、TUI storage | 各自业务 | 最近模型、后台服务注册、凭据、历史 |
+
+**核心区别**：① 是"程序行为"，② 是"界面偏好"，③ 是"运行记录"。
+插件通常只关心 ①；不要在插件里改 `cli.json`。
+
+---
+
+## 7.1 Server 配置：加载时机
+
+`Config.Service` 是 **Location 范围**服务，在 `Instance.layer(ref)` 启动时构建
+（`core/src/instance.ts`）。也就是说：
+
+- 不是 server 进程启动时加载；
+- 每个目录第一次被请求时加载一次；
+- 之后常驻该 Location（`LocationServiceMap` 不按空闲时间回收）；
+- 文件变化会触发重新发现与重算，并发布 `config.updated`（watcher + 100ms debounce）。
+
+所以同一个 daemon 打开两个项目，各自有一份独立的配置合并结果。
+
+---
+
+## 7.2 来源与优先级
+
+`ConfigDiscovery.discover()` + `Config.load()` 的合并顺序（**后者覆盖前者**）：
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│ ① Agent/Server 配置   opencode.jsonc / opencode.json                │
-│    决定 agent、model、provider、mcp、permission、plugin 等行为       │
-│    → server 进程加载（懒加载，按 directory 实例缓存）                │
-├─────────────────────────────────────────────────────────────────────┤
-│ ② 客户端偏好          tui.json (dev) / cli.json (v2.0.7 release)    │
-│    theme、keybinds、mouse、scroll、diffs、session 显示              │
-│    → client 进程（TUI/CLI）自己加载，从不发到 server                │
-├─────────────────────────────────────────────────────────────────────┤
-│ ③ 运行状态            model.json / auth.json / service.json / ...   │
-│    最近用的模型、API key、后台服务注册表、输入历史                   │
-│    → 各自的读写方在特定时机读写，不是"配置"，是状态                  │
-└─────────────────────────────────────────────────────────────────────┘
+1. well-known 远程配置
+     来自已连接集成（Integration）的 manifest
+     → 失败时保留上一次缓存
+
+2. 全局配置目录
+     $OPENCODE_CONFIG_DIR（若设置）或 ~/.config/opencode/
+     依次加载：
+       opencode.json
+       opencode.jsonc
+       （目录本身作为一个 Directory entry，供 .opencode 资产发现）
+
+3. OPENCODE_CONFIG 指定的文件
+
+4. 项目级 opencode.json / opencode.jsonc
+     从 cwd 向上逐级查找（到 home 或全局目录为止）
+     远的先、近的后 → 离 cwd 最近的优先级最高
+
+5. 各级 .opencode 目录
+     目录内的 opencode.json(c)，以及
+     agent/agents/*.md、mode/modes/*.md、
+     command/commands/**/*.md、plugin|plugins/*.ts、
+     skill|skills/**/SKILL.md 等资产
+     同样远的先、近的后
+
+6. OPENCODE_CONFIG_CONTENT
+     内联 JSON 字符串，优先级最高
 ```
 
-用户常问的"cli.json 是干嘛的"就属于②：它是 **v2.0.7 release 里客户端（TUI）偏好的文件**，与 agent 行为无关。本仓库 dev 分支对应的文件叫 `tui.json`（由 `TuiConfig` 加载，见 §7.2.2）。
+补充：
 
-## 7.1 何时、何地加载
+- `OPENCODE_CONFIG_PROJECT_DISABLE=1`（或 `OPENCODE_DISABLE_PROJECT_CONFIG=1`）
+  会关闭项目扫描，只保留全局/显式/内联来源；
+- `--server` / `--standalone` 只影响连接哪个 server，不改变 server 自己的配置来源；
+- 没有 `opencode.jsonc.local` 这种约定；个人覆盖请用 `OPENCODE_CONFIG` 指向私有文件。
 
-### 7.1.1 server 侧：懒加载 + 按 directory 缓存
+### 7.2.1 “后覆盖前”到底怎么合并
 
-配置加载**不在进程启动时**，而在**第一个针对某目录的请求到达时**（第 5 课 §5.3）：
+V2 **没有统一 deep merge**。`Config.entries()` 返回一个有序的 `Entry[]`，
+每个域所有者决定自己的合并方式：
 
-```
-HTTP 请求（带 directory）
-  → WorkspaceRoutingMiddleware        解析 ?directory= / x-opencode-directory 头
-  → InstanceContextMiddleware         middleware/instance-context.ts:23-35
-  → InstanceStore.load({directory})   project/instance-store.ts:108-124
-  → InstanceBootstrap.run             project/bootstrap.ts:32-46
-       ├─ yield* config.get()         bootstrap.ts:36  ← 配置在这！急切加载
-       └─ yield* plugin.init()        bootstrap.ts:38  ← 插件可以改写 config，必须最早
-```
+| 域 | 合并方式 | 位置 |
+|---|---|---|
+| `model`、`default_agent`、`shell`、`share`… | 取**最后一份包含该键的文档**（`Config.latest`） | 各 config plugin |
+| `providers` | 按文档顺序 fold，后来的字段覆盖 / 合并 | `config/plugin/provider.ts` |
+| `agents` | 按文档顺序逐个 `update`，后来的字段覆盖 | `config/plugin/agent.ts` |
+| `plugins` | 按文档顺序拼成操作列表 | `plugin/supervisor.ts` |
+| markdown 资产 | 每个文件生成一个 Document，按目录顺序合并 | `config/plugin/*` |
 
-两个设计点：
+这比"一个巨大的递归 merge"更好预测，也避免数组/对象语义混乱。
 
-- **每个目录一份实例**：合并结果缓存在 `InstanceState.make<State>(...)`（`config/config.ts:619-623`，底层是 `effect/instance-state.ts` 的 `ScopedCache`，按 `ctx.directory` 键控）。同一 server 打开两个项目目录 = 两份独立解析的配置。
-- **全局层进程级缓存**：`loadGlobal` 的结果用 `Effect.cachedInvalidateWithTTL` 缓存（`config.ts`，`Config.invalidate()` 或 worker 的 `rpc.reload` 时失效）——多个目录实例共享一次全局配置读取。
+### 7.2.2 配置目录里的 markdown
 
-`InstanceContext = { directory, worktree, project }`（`project/instance-context.ts:5-9`）：项目级配置向上搜索的边界是 **git worktree 根**；非 git 目录 `worktree = "/"`。
+`opencode.json(c)` 不是唯一来源。每个配置目录（包括 `.opencode`）还会被发现：
 
-### 7.1.2 client 侧：TUI 偏好在客户端进程解析
+| glob | 变成 |
+|---|---|
+| `agent/agents/**/*.md` | agent 定义（front-matter + 正文 system） |
+| `mode/modes/*.md` | agent 定义，强制 `mode: "primary"` |
+| `command/commands/**/*.md` | slash command 模板 |
+| `plugin/plugins/*.{ts,js}` | 本地插件 |
+| `skill/skills/**/SKILL.md`、`skills/*.md` | skill |
 
-- 老 TUI（`packages/opencode`）：`cli/cmd/tui.ts:231` 调 `TuiConfig.get()`，结果通过 `<TuiConfigProvider>` 注入 Solid 树（`packages/tui/src/app.tsx:296`）。
-- 新 v2 CLI（`packages/cli`）：`src/tui.ts:8` 在**客户端进程**里 `TuiConfig.resolve({})`——注意它压根不问 server。
-- v2.0.7 release 对应文件是 `~/.config/opencode/cli.json(c)`，`$schema` 为 `https://opencode.ai/v2/cli.json`。本机实测内容（theme/diffs/session/animations/mouse/scroll）：
+所以插件开发者可以把"配置 + 指令 + 工具"打包成目录结构，而不是只依赖 JSON。
+
+### 7.2.3 AGENTS.md
+
+`AGENTS.md` **不是** `opencode.jsonc` 的一部分，而是 `InstructionDiscovery` 的来源：
+
+- 全局：`$OPENCODE_CONFIG_DIR/AGENTS.md`
+- 项目：从 cwd 向上逐级到项目根（受 `global/project` 开关控制）
+- 文件变化会重新渲染指令增量
+
+这与 `config.instructions` 字段不同：当前 V2 的运行时指令发现主要走 AGENTS.md
+与代码内建来源。开发插件时，如果要注入"每轮都生效"的规则，
+优先用 `session.context` hook 或注册 instruction source，而不是改 AGENTS.md。
+
+---
+
+## 7.3 V2 配置 schema 速查
+
+定义在 `packages/schema/src/config.ts` 的 `Config.Info`：
+
+| 键 | 作用 |
+|---|---|
+| `$schema` | JSON Schema 引用 |
+| `model` | 默认模型（`{ providerID, model, variant? }`） |
+| `default_agent` | 默认 primary agent |
+| `agents` | agent 定义/覆盖（`system`、`mode`、`permissions`、`steps`…） |
+| `permissions` | 有序权限规则（action / resource / effect） |
+| `providers` | provider 与模型覆盖（settings、headers、body、models…） |
+| `plugins` | 插件声明（字符串或 `{ package, options }`） |
+| `mcp` | MCP servers 与 timeout |
+| `compaction` | `auto`、`buffer`、`keep.tokens` |
+| `commands` | 内联 slash command |
+| `skills` | 额外 skill 路径/URL |
+| `references` | 外部参考目录/Git 仓库 |
+| `formatter` / `lsp` | 格式化器 / 语言服务器 |
+| `snapshots` | 是否启用文件快照 |
+| `share` / `update` / `enterprise` / `username` | 分享、更新、企业、身份 |
+| `watcher.ignore` | 忽略的 watcher 路径 |
+| `tool_output` | 工具输出截断阈值 |
+| `websearch` | 搜索 provider |
+| `experimental` | 实验开关与组织策略 |
+
+### 7.3.1 权限规则
 
 ```jsonc
-// ~/.config/opencode/cli.json —— 纯客户端偏好，server 不感知
+{
+  "permissions": [
+    { "action": "*", "resource": "*", "effect": "allow" },
+    { "action": "read", "resource": "*.env", "effect": "ask" },
+    { "action": "shell", "resource": "rm -rf *", "effect": "deny" }
+  ]
+}
+```
+
+- 规则**有序**，评估时取最后一条同时匹配 action 与 resource 的规则；
+- 没有匹配 → `ask`；
+- 配置里的全局 permissions 会进入每个 agent 的规则集；最终叠加顺序是
+  agent（含配置）→ 会话 permissions → 已保存的 always 授权。
+
+### 7.3.2 插件声明
+
+```jsonc
+{
+  "plugins": [
+    "opencode-my-plugin",
+    { "package": "opencode-my-plugin", "options": { "level": 2 } },
+    "/abs/path/to/plugin-dir"
+  ]
+}
+```
+
+加载与排序见第 02 课。`options` 会原样传给插件 context。
+旧配置里的 `[target, options]` 元组会被归一化成对象形式，新配置请直接写对象。
+
+### 7.3.3 旧配置键
+
+`packages/core/src/config/normalize.ts` 会把旧键归一化成 V2：
+
+- `agent` → `agents`、`command` → `commands`、`plugin` → `plugins`；
+- `permission` / `tools` → `permissions`；
+- `attachment` → `media`、`snapshot` → `snapshots`；
+- `provider` → `providers`、`mode` → `agents`；
+- `compaction.preserve_recent_tokens` → `keep.tokens`、`reserved` → `buffer`。
+
+冲突时保留原生键并记录诊断；不支持/畸形的值会被跳过并警告。
+这是**兼容层**，新插件/新配置请直接写 V2 键。
+
+---
+
+## 7.4 解析管线
+
+```
+磁盘文件
+  → ConfigVariable.substitute   {env:VAR}、{file:path} 展开
+  → jsonc-parser               容忍尾逗号；语法错误 → 跳过该文件并告警
+  → ConfigNormalize.normalize  旧键 → V2 键；未知键忽略；诊断日志
+  → Schema.decode(Config.Info) 严格类型；失败 → 跳过该文档
+  → 进入 Entry[]（Document / Directory）
+```
+
+- 单文件失败不会拖垮整个配置；其余来源继续合并；
+- 诊断通过 `configuration normalization diagnostic` 日志输出；
+- 没有"自动补 `$schema`"的副作用。
+
+---
+
+## 7.5 `cli.json`：客户端偏好
+
+`packages/cli/src/config/config.ts`：
+
+- 路径：`~/.config/opencode/cli.json`（`$OPENCODE_CONFIG_DIR` 会改变全局目录）；
+- 也可用 `OPENCODE_CLI_CONFIG_CONTENT` 注入；
+- 只读**全局**文件，没有项目级 `cli.json`；
+- 读取/写入都加文件锁（Flock），写入是原子 rename；
+- 解析失败只警告，TUI 不会因配置崩溃。
+
+Schema 是 `@opencode/tui/config` 的 `Info`，常见内容：
+
+```jsonc
 {
   "$schema": "https://opencode.ai/v2/cli.json",
-  "theme":   { "name": "opencode" },
-  "diffs":   { "wrap": "word" },
-  "session": { "sidebar": "auto", "scrollbar": false,
-               "thinking": "show", "permissions": "autoaccept" },
+  "theme": { "name": "opencode" },
+  "diffs": { "wrap": "word" },
+  "session": { "sidebar": "auto", "scrollbar": false },
   "animations": true,
   "mouse": true,
   "scroll": { "speed": 1, "acceleration": true }
 }
 ```
 
-### 7.1.3 状态文件（③类）：各自在业务时机读写
+它**不会**发给 server，也不影响 agent 行为。
+旧版 `tui.json` 由迁移逻辑转换成 `cli.json`（`cli/src/config/migrate.ts`），
+新代码不再读 `tui.json`。
 
-| 文件 | 位置 | 读写时机 | 内容 |
+---
+
+## 7.6 状态文件
+
+| 文件 | 位置 | 谁写 | 用途 |
 |---|---|---|---|
-| `model.json` | `~/.local/state/opencode/` | TUI 切模型时写（`packages/tui/src/context/local.tsx:169-180`，原子写）；server 解析默认模型时读（`provider/provider.ts:2030-2063`：config `model` > `recent` 中第一个仍存在的） | `{recent: [{providerID, modelID}], favorite: [], variant: {"provider/model": "..."}}` |
-| `auth.json` | `~/.local/share/opencode/` | OAuth 登录/API key 写入（`src/auth/index.ts`，权限 `0o600`） | `{ [providerID]: {type: "api"\|"oauth"\|"wellknown", ...} }` |
-| `mcp-auth.json` | `~/.local/share/opencode/` | MCP OAuth 流程 | 各 MCP server 的 token |
-| `service.json`（v2.0.7）/ `server.json`（dev） | `~/.local/state/opencode/` | 后台 daemon 启停时写（第 8 课 §8.5） | `{id, version, url, pid, password?}` |
-| `kv.json`、`prompt-history.jsonl`、`frecency.jsonl` | `~/.local/state/opencode/` | TUI 运行期 | 任意 KV / 输入历史 / 文件提及频次 |
-| `plugin-meta.json` | `~/.local/state/opencode/` | 插件安装 | 插件安装元数据 |
+| `model.json` | `$XDG_STATE_HOME/opencode/` | TUI 模型选择 | 最近模型、favorite、variant |
+| `service.json`（注册） | 同上 | daemon 注册 | `{ id, version, url, pid, password }` |
+| `service.json`（配置） | `~/.config/opencode/` | `opencode service set` | disabled/remote/hostname/port/cors/env |
+| `service-<channel>.json` | 同上 | 非默认 channel | 开发/本地渠道隔离 |
+| `prompt-history.jsonl` | 同上 | TUI 输入历史 | 上下键历史 |
+| `frecency.jsonl` | 同上 | TUI 文件提及 | `@` 补全排序 |
+| TUI storage `<channel>/tui/*.json` | 同上 | TUI 插件/界面状态 | 会话选择、终端选择等 |
+| `auth` / credential | SQLite / credential 服务 | 登录流程 | API key / OAuth |
+| `opencode.db` | `$XDG_DATA_HOME/opencode/` | server | 会话、事件、收件箱（第 09 课） |
 
-## 7.2 配置文件全景清单
+这些都不是 `Config.Service` 的输入。插件若需要持久化自己的状态，应使用
+`ctx.storage`（按插件 ID 隔离的 KV），而不是写这些文件。
 
-### 7.2.1 ①类：opencode 主配置（合并成一份 `ConfigV1.Info`）
+---
 
-| 层 | 文件/来源 | 发现逻辑 | 代码 |
-|---|---|---|---|
-| 全局 | `~/.config/opencode/opencode.jsonc` → `opencode.json` → `config.json` | 读侧：三个**都读**、按此顺序合并（`config.json` 最低、`opencode.jsonc` 最高）；写侧：`globalConfigFile()` 取第一个**存在**的，都不存在则选 `opencode.jsonc` | `config.ts:140-148`、`loadGlobal` `config.ts:260-293` |
-| 项目级 | 从 cwd 向上到 worktree 根的每一级 `opencode.json` / `opencode.jsonc` | `afs.up()` 收集后 `toReversed()` → **根先合并、离 cwd 最近的最后合并（优先级最高）** | `config/paths.ts:10-21` |
-| `.opencode` 目录 | 各级 `.opencode/opencode.json(c)` + markdown 资产 | 目录序列见下 | `config.ts:430-485`、`paths.ts:23-41` |
-| 环境变量 | `OPENCODE_CONFIG`（单文件）、`OPENCODE_CONFIG_CONTENT`（内联 JSON 字符串）、`OPENCODE_CONFIG_DIR`（附加目录，同时重定向全局配置目录） | | `core/src/flag/flag.ts` |
-| 远程 | well-known（`auth.json` 里 `type:"wellknown"` 的条目 → `<url>/.well-known/opencode` → `remote_config.url`）；组织 console 配置（`<url>/api/config`） | 加载时 HTTP 拉取，用 auth token 做 `{env:}` 替换 | `config.ts` well-known 段、`fetchRemoteJson` `config.ts:201-225` |
-| 托管 | `/etc/opencode`（Linux）、`/Library/Application Support/opencode`（macOS）、`%ProgramData%\opencode`（Windows）；macOS 再叠 MDM `ai.opencode.managed.plist` | 企业统管，"override everything" | `config/managed.ts` |
+## 7.7 热更新与诊断
 
-**`.opencode` 目录的搜索序列**（`ConfigPaths.directories`，`paths.ts:23-41`，依次合并）：
+### 热更新
 
-```
-~/.config/opencode            （全局配置目录）
-<worktree>/.opencode          （从根往 cwd 逐级，每一级）
-.../<cwd>/.opencode
-$HOME/.opencode               （家目录兜底）
-$OPENCODE_CONFIG_DIR          （若设置）
-```
+- **配置文件 / AGENTS.md / skill / plugin 文件变化**：watcher 触发重载；
+- 配置变化发布 `config.updated`，各 config plugin 重新加载并刷新对应注册表；
+- 插件变化触发 `PluginSupervisor.activate()`，按代际只重载变化的插件；
+- 客户端不需要重启；TUI 通过事件收到更新后的状态。
 
-每个 `.opencode` 目录不只提供 `opencode.json(c)`，还提供 **markdown 资产**（`config.ts` 内依次 `ConfigCommand.load` → `ConfigAgent.load` → `ConfigAgent.loadMode` → `ConfigPlugin.load`）：
+### 诊断
 
-| glob | 变成 | 代码 |
-|---|---|---|
-| `{command,commands}/**/*.md` | `config.command` 条目（body = 模板） | `config/command.ts:13-39` |
-| `{agent,agents}/**/*.md` | `config.agent` 条目（front-matter = 配置，body = prompt） | `config/agent.ts:11-32` |
-| `{mode,modes}/*.md` | agent 条目，强制 `mode:"primary"` | `config/agent.ts:34-59` |
-| `{plugin,plugins}/*.{ts,js}` | `plugin_origins`（file:// 加载） | `config/plugin.ts:18-30` |
-
-首次使用某个 `.opencode` 目录时还会：写 `.opencode/.gitignore`（`ensureGitignore`，`config.ts:309-326`，忽略 node_modules 等）；后台 `npm install @opencode-ai/plugin`（`config.ts:452-474`，外部插件加载前由 `Config.waitForDependencies()` join）。
-
-> **注意**：v2 **没有** `opencode.jsonc.local` 这类 local 覆盖文件（grep 全仓库无此概念）。个人覆盖请用 `OPENCODE_CONFIG` 指向私有文件，或提交不含密钥的 `opencode.jsonc` + `{env:}` 变量替换。
-
-### 7.2.2 ②类：TUI/CLI 偏好（dev 分支叫 tui.json）
-
-加载顺序（`config/tui.ts:83-226`，后覆盖先）：
-
-```
-~/.config/opencode/tui.json(c)          全局（最低）
-$OPENCODE_TUI_CONFIG                    显式指定文件
-<worktree → cwd> 的 tui.json(c)        项目级（nearest wins，同 ConfigPaths.files）
-.opencode 目录 + $OPENCODE_CONFIG_DIR  内的 tui.json(c)
-```
-
-细节：嵌套的 `{"tui": {...}}` 会被展平（`tui.ts:55-69`）；未知 keybinds 丢弃；**文件解析失败只警告不崩溃**（TUI 不能因配置挂掉）。老版本写在 `opencode.json` 里的 `theme`/`keybinds`/`tui` 键会被自动迁移到旁边的 `tui.json`（`config/tui-migrate.ts:29-113`，原文件备份为 `*.tui-migration.bak`）——`loadConfig` 读到这些键也会直接剥离（`normalizeLoadedConfig`，`config.ts:54-63`）。
-
-### 7.2.3 写入侧的保形 patch
-
-改全局 `opencode.jsonc` 时不是 `JSON.stringify` 整个重写，而是用 `jsonc-parser` 的 `modify/applyEdits` 做**保注释、保缩进的 patch**（`patchJsonc`，`config.ts:150-162`）；`Config.update` 则把合并结果写到 `<实例目录>/config.json`。通过 `Config.updateGlobal` 改全局配置后，server 会 **dispose 所有实例**（第 5 课 §5.10）。
-
-## 7.3 合并顺序（权威表）
-
-`Config.get()`（接口见 `config.ts:125-134`）→ `loadInstanceState`（`config.ts:328-617`）。合并函数 `mergeConfigConcatArrays`（`config.ts:46-52`，remeda `mergeDeep` 深合并，**后合并的覆盖先合并的**），唯一特例：`instructions` 数组**跨层拼接**而不是覆盖。
-
-**从低到高**（序号大的覆盖序号小的）：
-
-| # | 层 | scope | 代码位置（config.ts） |
-|---|---|---|---|
-| 1 | 远程 well-known 配置 | global | well-known 段（`config.ts` §328 起 +44 行附近） |
-| 2 | 全局配置（`config.json` < `opencode.json` < `opencode.jsonc`，含 TOML 迁移） | global | `loadGlobal` `:260-293` |
-| 3 | `OPENCODE_CONFIG` 指定文件 | — | `:415-417` |
-| 4 | 项目级 `opencode.json(c)`（根 → cwd，nearest wins） | local | `:420-424` |
-| 5 | `.opencode` 目录（配置文件 + markdown 资产 + 插件） | — | `:430-485` |
-| 6 | `OPENCODE_CONFIG_CONTENT` 环境变量 | local | `:487-495` |
-| 7 | 组织 console 远程配置 | global | `:497-533` |
-| 8 | Managed 目录（`/etc/opencode` 等） | global | `:535-541` |
-| 9 | macOS MDM managed preferences | global | `:543-553`（最高） |
-
-合并完的**派生/归一化**（`config.ts:555-603`）：
-
-- `mode` 条目折叠进 `agent`（`mode:"primary"`）——mode 是 agent 的旧名；
-- `OPENCODE_PERMISSION` 环境变量（JSON 字符串）深合并进 `permission`；
-- 遗留 `tools: Record<string,boolean>` 降级成 permission allow/deny（`write/edit/patch` 合并为 `edit`）；
-- `username` 缺省取 `os.userInfo().username`；
-- `OPENCODE_DISABLE_AUTOCOMPACT` / `OPENCODE_DISABLE_PRUNE` → `compaction.auto/prune = false`。
-
-**CLI flag 不参与这份合并**：`--model`、`--agent`、`--variant` 等在 CLI/TUI 层于配置解析**之后**应用（如 variant 优先级：flag > `model.json` 里保存的偏好 > 会话历史，`cli/cmd/run/variant.shared.ts:1-8` 头注释）。
-
-## 7.4 解析管线：一个配置文件被读成什么样
-
-```
-磁盘文件
-  → ConfigVariable.substitute     {env:VAR} {file:path} 展开（跳过 // 注释；{file:} 相对配置文件目录）
-      config/variable.ts:34-91
-  → ConfigParse.jsonc             jsonc-parser，容忍尾逗号；错误带行号/列号/caret
-      config/parse.ts:8-33
-  → ConfigV2Compat.lower          v2 原生写法 → v1 键（§7.6），冲突产出 Diagnostic 警告
-  → ConfigParse.schema            Effect Schema 解码，errors:"all"
-      config/parse.ts:35-61       onExcessProperty: "ignore" —— 未知键被忽略而非报错
-  → 参与合并
-```
-
-顺带的小魔法：`loadConfig`（`config.ts:227-251`）发现文件没有 `$schema` 时会**自动补写** `"$schema": "https://opencode.ai/config.json"` 并回写文件——所以你的配置文件会"自己长出"一行 schema 声明。
-
-## 7.5 主配置 schema 速查（`ConfigV1.Info`）
-
-定义在 `packages/core/src/v1/config/config.ts:32-190`（叫 V1 是历史命名，就是当前 wire 格式）。常用段落：
-
-| 键 | 作用 |
+| 目的 | 方法 |
 |---|---|
-| `model` / `small_model` | 默认模型 / 辅助模型（`provider/model` 格式） |
-| `agent` | agent 注册表；内置 `build/plan/general/explore/title/summary/compaction`，配置覆盖或新增（子键：`model/prompt/tools/permission/steps/mode/hidden/...`，未知键折叠进 `options`） |
-| `provider` | 自定义 provider、覆盖 models.dev 目录里的模型参数（cost/limits/options/headers） |
-| `mcp` | MCP server（本地 command 或远程 url + OAuth） |
-| `command` | 命令（通常来自 markdown，也可在此内联） |
-| `plugin` | 外部插件（npm spec 或路径，可带 options 元组） |
-| `instructions` | 追加 system 指令（**跨层拼接**的特例键） |
-| `permission` | 工具权限规则（allow/deny/ask + pattern） |
-| `formatter` / `lsp` | 格式化器 / LSP 配置 |
-| `server` | `port/hostname/mdns/cors` |
-| `compaction` | `auto/prune/tail_turns/preserve_recent_tokens/reserved` |
-| `share` / `autoupdate` / `snapshot` / `watcher.ignore` | 分享链接、自动更新、快照、忽略模式 |
-| `experimental` | 实验开关（`batch_tool`、`continue_loop_on_deny`、`mcp_timeout`…） |
-| `skills` / `references` | skill 路径/URL、参考目录 |
+| 看配置来源与合并结果 | `opencode debug config` |
+| 看 agent | `opencode debug agents` |
+| 看路径 | `opencode debug paths`（db/home/data/config/cache/state…） |
+| 看插件 | `opencode plugin list`、`opencode plugin check` |
+| 看服务 | `opencode service status`、`opencode api get /api/info` |
+| 日志 | `--print-logs`；server 日志在 `~/.local/share/opencode/log/` |
 
-**已搬走**：`theme`/`keybinds`/`tui` → `tui.json`（dev）/ `cli.json`（release）。
+> `opencode debug config` 打印的是脱敏后的**有效配置文档列表**，
+> 不是简单的 JSON merge 结果；排查"为什么我的值没生效"时，
+> 先看目标键最后出现在哪个文档里。
 
-## 7.6 v2 原生配置与降级（`v2-compat.ts`）
+---
 
-配置文件可以用**新的 v2 原生键**写，加载时由 `ConfigV2Compat.lower()`（`config/v2-compat.ts:91-132`）重写成 v1 键，带 `Diagnostic {kind: "invalid"|"unsupported"|"conflict", path, message}` 警告：
+## 7.8 插件开发者应该关心什么
 
-- **硬错误**：`permissions`（v2 复数形式）任何位置出现都直接 `InvalidError`——"Use V1 'permission' rules or run opencode2"；
-- **重命名**：`agents`→`agent`（`system`→`prompt`、`disabled`→`disable`、`request.body`→`options`）、`commands`→`command`、`snapshots`→`snapshot`、`media`→`attachment`、`compaction.keep.tokens`→`preserve_recent_tokens`、`compaction.buffer`→`reserved`；
-- **模型串**：`"provider/model#variant"` 或 `{providerID, model, variant}` → `{model, variant}`；
-- **MCP**：嵌套 `mcp.servers.{name}` 摊平为 `mcp.{name}`；OAuth 键 snake_case→camelCase；
-- **不支持并丢弃**：`plugins`、`providers`、`websearch`、`warming`、agent `request.headers` 等；
-- **冲突**：同一含义新旧键并存且值不同 → **保留 v1 值**，产出 conflict 诊断。
+| 需求 | 推荐做法 |
+|---|---|
+| 自己的配置项 | 用 `ctx.storage` 存状态；需要用户可配的项，向 `Config.Info` 提议新字段或使用插件 options |
+| 读用户配置 | `Config.Service.entries()` / `Config.latest(entries, key)` |
+| 监听配置变化 | `config.changes()` 或订阅 `config.updated` 事件 |
+| 改 agent/skill/tool/provider | 对应 `ctx.*.transform`，不要直接改配置文件 |
+| 客户端偏好 | 不要碰；那是 TUI 的 `cli.json` |
+| 密钥 | 用 Credential / Integration，不要写入 `opencode.jsonc` |
 
-## 7.7 观测与热更新
+---
 
-- **看最终合并结果**：`opencode debug config`（`cli/cmd/debug/config.ts`，dump 脱敏后的 `Config.get()`）——排层序问题的第一工具。
-- **改实例配置**：`PATCH /config` → 写盘 + `markInstanceForDisposal` → `server.instance.disposed` 事件 → 实例（含配置、插件、provider 注册表）整体重建（第 5 课 §5.10）。
-- **改全局配置**：`Config.updateGlobal` → dispose **所有**实例。
-- **TUI 内嵌 worker 的 reload 通道**：`rpc.reload` → `Config.invalidate()` + 全量 dispose（`cli/tui/worker.ts:63-71`）。
+## 7.9 小结
 
-## 7.8 小结
+1. **三类数据分开**：server 配置、客户端偏好、运行状态。
+2. **配置按 Location 懒加载**，不是进程启动时一次性读完。
+3. **来源有序**：well-known → 全局 → 显式 → 项目 → `.opencode` → 内联。
+4. **没有统一 deep merge**：每个域按自己的规则取最后文档或 fold。
+5. **`cli.json` 只属于客户端**，不影响 server/agent。
+6. **状态文件不是配置**：插件状态用 `ctx.storage`。
 
-1. 配置分三类：**server 侧主配置**（`opencode.jsonc` 多层合并）、**客户端偏好**（`tui.json`/`cli.json`，TUI 进程自读）、**状态文件**（`model.json`、`auth.json`、`service.json` 等，各业务自管）。
-2. 主配置在**第一个目录请求**时懒加载，按 `InstanceState` 每目录缓存；全局层进程级缓存。
-3. 9 层合并：well-known < 全局 < `OPENCODE_CONFIG` < 项目（nearest wins）< `.opencode` 目录 < `OPENCODE_CONFIG_CONTENT` < console < managed < MDM。
-4. `cli.json`（v2.0.7）= TUI/CLI 偏好，等价于 dev 分支的 `tui.json`；它不影响 agent/server 行为。
-5. v2 原生键会被 `v2-compat` 降级；`permissions`（复数）是硬错误；未知键默认忽略。
-6. 排查第一步永远是 `opencode debug config`。
+> **迁移小注**：旧文档的 `ConfigV1.Info`、`loadInstanceState`、`tui.json`、
+> `server.json`、`v2-compat.lower()` 都是 V1/过渡期概念；
+> V2 对应 `Config.Info`、`Config.Service.entries()`、`cli.json`、`service.json`、
+> `ConfigNormalize`。
