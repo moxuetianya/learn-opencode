@@ -491,6 +491,92 @@ Execution ⊃ Drain ⊃ Step ⊃ Physical Attempt
 
 ---
 
+## Q9. “store 的最终投影”是什么？
+
+这里的 **store** 指 TUI 客户端的内存状态仓库
+（`packages/client/src/solid/data.ts` 的 `createData()`，底层是 Solid store）。
+
+**投影（projection）** 是从“事实来源”推导出来的可读状态：
+
+- 服务端投影：durable 事件 → `session_message` / `session_inbox` / `session_v2` 等表；
+- 客户端投影：**初始同步快照 + 实时 SSE 事件 + 本地乐观提交** → Solid store。
+
+所以“store 的最终投影”不是事件流本身，也不是某一条事件的 payload，而是：
+
+> 经过同步、事件归并、乐观提交回滚/确认之后，store 里**当前可用于渲染和读取**的那份状态。
+
+### TUI store 里有什么
+
+```ts
+store.session.info        // Session 元数据
+store.session.message     // 可见消息列表
+store.session.pending     // 未投递的 inbox 条目
+store.session.permission  // 权限请求
+store.session.form        // 表单
+store.project             // 项目
+store.location            // 当前 Location
+```
+
+TUI 插件通过 `ctx.data` 读取，而不是直接摸内部 store：
+
+```ts
+ctx.data.session.get(sessionID)
+ctx.data.session.message.list(sessionID)
+ctx.data.session.message.get(sessionID, messageID)
+ctx.data.session.pending.list(sessionID)
+ctx.data.session.permission.list(sessionID)
+```
+
+### 为什么说“以最终投影为准”，而不是相信事件顺序
+
+因为客户端状态有多个来源：
+
+1. **初始同步**：`session.get` / `session.messages` / `pending` 等 HTTP 请求；
+2. **实时事件**：SSE 的 delta 与 durable 事件；
+3. **本地乐观提交**：prompt 先插入本地 pending 行，失败再回滚；
+4. **重连**：`server.connected` 后重新拉取状态。
+
+这些来源可能交错：
+
+- 同步响应可能比实时事件旧；
+- 同一条事件可能重复到达；
+- 乐观行可能先于服务端 echo 出现；
+- 断线重连后，delta 会缺失，只能靠投影补齐；
+- 同一个 ID 的事件可能先 `started` 后 `retry`，不能假设“started 一定新建消息”。
+
+`createData()` 里有专门的归并逻辑（`activeUpdates`、`pendingUpdates`、`outbox`、
+`settle`、`reconcile` 等）处理这些竞态。插件不应该自己再数事件或假设顺序。
+
+### 实际含义
+
+写 TUI 插件时：
+
+- 事件只当作“有变化”的信号；
+- 渲染时读 `ctx.data` 的当前投影；
+- 需要派生数据时，用 `createMemo` 基于投影计算；
+- 不要让插件自己维护一份“权威消息列表”，再和 store 对账；
+- 临时 UI 状态用 `ctx.storage.memory`，持久状态用 `ctx.storage.store`。
+
+例子：不要这样做：
+
+```ts
+// 错：假设 enqueued 后一定 delivered，自己维护计数
+let pending = 0
+ctx.data.on("session.inbox.enqueued", () => pending++)
+ctx.data.on("session.inbox.delivered", () => pending--)
+```
+
+应该这样做：
+
+```ts
+// 对：投影是唯一读模型
+const pending = () => ctx.data.session.pending.list(sessionID)
+```
+
+这样即使事件重复、乱序、重连补拉，界面仍然和最终状态一致。
+
+---
+
 ## 相关源码
 
 | 主题 | 文件 |
@@ -505,6 +591,9 @@ Execution ⊃ Drain ⊃ Step ⊃ Physical Attempt
 | move 控制项 | `packages/core/src/session/move.ts` |
 | 手动压缩控制项 | `packages/core/src/session/session.ts`（`compact`） |
 | 自动/溢出压缩 | `packages/core/src/session/compaction.ts` |
+| 客户端投影 | `packages/client/src/solid/data.ts` |
+| 客户端事件连接 | `packages/client/src/solid/connection.ts` |
+| TUI 数据上下文 | `packages/tui/src/context/data.tsx` |
 
 ---
 
