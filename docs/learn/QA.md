@@ -694,18 +694,29 @@ mode
 
 它**不能**：
 
-- 从命令面板移除/隐藏内置命令；
+- 通用地过滤/移除命令面板里的任意命令；
 - 过滤 `commands()` 的返回结果；
-- 拦截某个内置命令的执行；
+- 拦截任意命令执行；
 - 阻止用户直接输入 `/new`、`/model` 等文本；
-- 覆盖内置命令的实现（同名注册不是受支持的“替换”语义）。
+- 提供正式的“命令策略”或“只读模式”钩子。
+
+但它**可以尝试同名 shadow（覆盖）**：
+
+`@opentui/keymap` 的 command 是按 layer + priority 解析的，同名命令在
+`reachable`/active chain 中取优先级最高（同优先级时后注册者优先）的那一条。
+因此插件可以用**相同的 command id** 注册一个更高优先级的层，替换该命令在
+命令面板、slash 补全和按键绑定中的执行实现。
+
+这属于“覆盖”，不是“过滤”；它依赖内置命令 ID，属于较脆弱的集成方式，
+而且只发生在 TUI 客户端进程内。具体做法和限制见 Q12。
 
 内部 TUI 的 `keymap.intercept` 存在于 `tui/src/context/keymap.tsx`，
-但**没有暴露**在插件 `Context` 的 `Keymap` 接口里，所以插件也不能靠它拦键。
+但**没有暴露**在插件 `Context` 的 `Keymap` 接口里，所以插件不能靠它拦键。
 
 命令面板构建自 `Keymap.useCommands()`（`component/command-palette.tsx`），
 斜杠补全同时合并 keymap 命令和 server 命令
-（`component/prompt/autocomplete.tsx`），两者都没有插件过滤点。
+（`component/prompt/autocomplete.tsx`）。它们没有“过滤”钩子，但会按
+reachable 链取同名命令的最高优先级条目，所以同名 shadow 可以替换显示与执行。
 
 ### Server 插件能做什么
 
@@ -751,6 +762,135 @@ type Editor = { add: (definition: Definition) => void }
 
 ---
 
+## Q12. 用 TUI 插件覆盖这些命令，把它们改成“只能查看”可行吗？
+
+**技术上可行，但要明确它只是 TUI 客户端的“覆盖”，不是强制策略，也不是过滤。**
+
+原理：`@opentui/keymap` 支持同名 command 的跨 layer shadowing。
+
+- 命令按 layer `priority` 排序；同优先级时后注册者优先；
+- 命令面板读 `reachable`，同名只保留最高优先级的条目；
+- slash 补全读 keymap 的 reachable 命令；
+- 按键绑定最终也按 command ID 解析同一条 chain。
+
+所以插件可以用**相同 command ID** 注册一个更高优先级的层，把内置实现替换成只读版本。
+
+### 需要覆盖的命令 ID
+
+| 目标 slash | command ID | 备注 |
+|---|---|---|
+| `/models` | `model.list` | |
+| `/agents` | `agent.list` | |
+| `/variants` | `variant.list` | aliases: `thinking`, `effort` |
+| `/connect` | `provider.connect` | |
+| `/new` | `session.new` | |
+| `/fork` | `session.fork` | 只在 session 路由注册 |
+| `/sessions`、`/resume` | `session.list` | aliases: `resume`, `continue` |
+| `/plugins` | `plugins.list` | 由 TUI feature plugin 注册 |
+| `/mcps` | `mcp.list` | |
+| `/skills` | `prompt.skills` | |
+
+还有一批**不在 slash 列表里、但同样会改状态**的命令，只读模式也必须覆盖：
+
+```
+model.cycle_recent
+model.cycle_recent_reverse
+model.cycle_favorite
+model.cycle_favorite_reverse
+agent.cycle
+agent.cycle.reverse
+variant.cycle
+```
+
+否则用户仍可以用快捷键轮换模型/agent/variant。
+
+### 最小骨架
+
+```ts
+import { define } from "@opencode/plugin/tui"
+
+export default define({
+  id: "task.readonly-commands",
+  setup: (ctx) => {
+    const isTaskSession = () => {
+      const route = ctx.ui.router.current()
+      if (route.type !== "session") return false
+      return ctx.data.session.get(route.sessionID)?.metadata?.task === true
+    }
+
+    ctx.keymap.layer(() => ({
+      mode: "global",
+      priority: 1000,
+      enabled: isTaskSession,
+      commands: [
+        {
+          id: "model.list",
+          title: "Models (read-only)",
+          palette: true,
+          slash: { name: "models" },
+          run: () => {
+            const models = ctx.data.location.model.list() ?? []
+            void ctx.ui.dialog.alert({
+              title: "Models (read-only)",
+              message: models
+                .map((model) => `${model.providerID}/${model.id}`)
+                .join("\n"),
+            })
+          },
+        },
+        {
+          id: "agent.list",
+          title: "Agents (read-only)",
+          palette: true,
+          slash: { name: "agents" },
+          run: () => {
+            const agents = ctx.data.location.agent.list() ?? []
+            void ctx.ui.dialog.alert({
+              title: "Agents (read-only)",
+              message: agents.map((agent) => agent.id).join("\n"),
+            })
+          },
+        },
+        // ...其余命令同样覆盖
+      ],
+    }))
+  },
+})
+```
+
+关键点：
+
+- `run` **不能返回 `false`**，否则 keymap 会继续尝试下一条（内置）命令；
+- `mode: "global"` 让覆盖在任意输入模式下都生效；
+- `priority` 设得高于内置层；
+- `enabled` 只对任务会话生效，其他会话仍用内置行为；
+- slash 的 `name`/`aliases` 要与内置一致，否则补全仍会显示旧入口；
+- 命令 ID 是 TUI 内部常量，升级时可能改名，需要回归测试。
+
+### 这个方案的能力边界
+
+能做：
+
+- 替换列表中的 TUI 命令实现；
+- 在命令面板/slash 补全里显示只读版本；
+- 让对应快捷键执行只读版本；
+- 对其他会话保持原行为。
+
+不能做：
+
+- 阻止直接调用 HTTP API（`switchModel`、`switchAgent`、`create`、`fork` 等）；
+- 阻止其他客户端（`opencode run`、Web、SDK、另一个 TUI 实例）；
+- 覆盖 `/init`、`/review` 这类 **server 命令**（需要 server 插件或网关）；
+- 防止用户禁用插件/修改配置；
+- 保证未来版本命令 ID 不变。
+
+因此：
+
+> **如果只是 BugHunter 的 TUI 防误触，这个覆盖方案可用。**
+> **如果要真正保证流水线确定性，还必须在 server/API 层做授权与拒绝。**
+
+---
+
 ## 相关源码
 
 | 主题 | 文件 |
@@ -768,6 +908,10 @@ type Editor = { add: (definition: Definition) => void }
 | 客户端投影 | `packages/client/src/solid/data.ts` |
 | 客户端事件连接 | `packages/client/src/solid/connection.ts` |
 | TUI 数据上下文 | `packages/tui/src/context/data.tsx` |
+| TUI keymap / 命令层 | `packages/tui/src/context/keymap.tsx` |
+| TUI 命令面板 | `packages/tui/src/component/command-palette.tsx` |
+| TUI slash 补全 | `packages/tui/src/component/prompt/autocomplete.tsx` |
+| TUI 插件 API | `packages/plugin/src/tui/context.ts` |
 
 ---
 
