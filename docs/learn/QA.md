@@ -577,6 +577,83 @@ const pending = () => ctx.data.session.pending.list(sessionID)
 
 ---
 
+## Q10. TypeScript 里每个 `Object` 都能调用 `.on()` 吗？
+
+**不能。** `.on()` 不是 `Object.prototype` 的方法。
+
+`Object.prototype` 只有 `hasOwnProperty`、`toString`、`valueOf` 这类方法；
+普通对象没有 `on`：
+
+```ts
+const x = {}
+x.on("event", () => {})
+// TS: Property 'on' does not exist on type '{}'
+// JS: TypeError: x.on is not a function
+```
+
+`ctx.data.on(...)` 能调用，是因为 **`ctx.data` 的类型显式声明了 `on`**：
+
+```ts
+// packages/plugin/src/tui/context.ts
+export interface Data {
+  readonly on: <Type extends OpenCodeEvent["type"]>(
+    type: Type,
+    handler: (event: OpenCodeEventMap[Type]) => void,
+  ) => () => void
+  // ...
+}
+```
+
+实现位置：
+
+```ts
+// packages/client/src/solid/data.ts
+const result = {
+  on: config.event.on,
+  listen: config.event.listen,
+  // ...
+}
+```
+
+而 `config.event` 来自 TUI 的 `createGlobalEmitter()`（`tui/src/context/client.tsx`）。
+所以它不是“所有对象自带”，而是 **`Data` 接口提供的一个事件订阅方法**。
+
+### TypeScript 的判断依据
+
+TypeScript 用结构化类型：只要一个值的类型里有 `on`，就能调用。
+
+```ts
+interface Bus {
+  on(name: string, handler: () => void): () => void
+}
+
+declare const bus: Bus
+bus.on("x", () => {}) // 可以，类型里有 on
+```
+
+类似但互不相关的 `on`：
+
+| 来源 | 是否有 `on` |
+|---|---|
+| `ctx.data` | 有，`Data` 接口声明 |
+| Node.js `EventEmitter` | 有，类方法 |
+| 浏览器 `EventTarget` / DOM | 有 `addEventListener`，部分库再包一层 `on` |
+| 普通 `{}` / `Object` | **没有** |
+| `Map` / `Set` / `Array` | **没有** |
+
+### 注意返回值
+
+`ctx.data.on()` 返回的是**取消订阅函数**：
+
+```ts
+const off = ctx.data.on("session.inbox.delivered", handler)
+off() // 取消订阅
+```
+
+TUI 插件卸载时应调用它（或把它放进插件自己的 cleanup），避免事件处理器泄漏。
+
+---
+
 ## 相关源码
 
 | 主题 | 文件 |
