@@ -2,9 +2,12 @@
 
 > 本课回答：**V2 的后台进程（daemon）直接结束后，能被主动调起吗？** 结论：能，但不是它自己复活——
 > opencode 没有 launchd/systemd 级别的守护或外部 watchdog，**复活是懒式的、由下一个客户端启动驱动的**。
-> 任何 `opencode` 命令（TUI / `opencode api` / Desktop / SDK）启动时都会执行一次
+> 任何 `opencode` **命令**（TUI / `opencode api` / Desktop）启动时都会执行一次
 > `Service.ensure`：发现服务不在（或假死/版本不符），就**由客户端进程把服务重新 spawn 出来**，
 > 对用户表现为透明。
+>
+> 例外：`@opencode/sdk` **不走 daemon**——它把 server 嵌进调用方进程内跑（嵌入式 routes +
+> 进程内 fetch + 默认 `:memory:` 数据库），不参与 `service.json` 发现与拉活，见第 13 课。
 >
 > 承接第 9 课（§9.5 daemon 模型）的进程拓扑；本课深入生命周期的每个环节。
 
