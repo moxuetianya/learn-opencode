@@ -39,6 +39,7 @@
 | 附 | [`QA.md`](./QA.md) | 学习问答：steer/queue、execution、drain、收件箱与控制项；构建/channel、配置与数据目录、多实例定制、location 与环境变量 |
 | 附 | [`effect-yield-pipe-fork.md`](./effect-yield-pipe-fork.md) | 读 Effect 代码的读法：`yield*` / `pipe` / `forkScoped`、Queue 生产者-消费者、与 Rust 对照 |
 | 附 | [`local-release-build.md`](./local-release-build.md) | 本地构建正式版：`script/build-release.sh` 用法、channel/version 语义、冒烟与排错 |
+| 附 | [`instruction-delta-and-cache.md`](./instruction-delta-and-cache.md) | 指令变更如何进入会话：基线 vs 增量、会话账本、AGENTS.md/skill 检测矩阵、缓存账、compaction/revert/fork |
 
 阅读顺序就是编号顺序：**01 → 02 → 03 → 04 → 05 …**。
 前四课先把"一次启动 + 一次对话 + 并发边界 + 核心不变式"跑通；

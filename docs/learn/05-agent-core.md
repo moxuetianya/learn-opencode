@@ -226,8 +226,10 @@ skills/<name>.md
 - **用户直接调用**：`Session.skill` 发布 `session.skill.activated` 事件，把
   `<skill_content>` 作为可见消息写入历史，并默认唤醒执行。
 
-Skill 列表变化时，指令来源会生成增量文本（新增/移除/描述变化），
-而不是整段重发，保护 prompt cache。
+Skill 列表变化时，指令来源会生成增量文本（新增/移除给差量，描述变化退回全文重述），
+而不是整段重发，保护 prompt cache。注意**正文不在列表里**：正文走工具结果，
+已经加载过的那份会留在历史中，改文件只影响下一次加载（详见附录
+[`instruction-delta-and-cache.md`](./instruction-delta-and-cache.md)）。
 
 ---
 
@@ -258,6 +260,9 @@ CodeModeInstructions
 ```
 
 这样可以最大化 provider 的 prompt cache 命中率。
+
+> 顺序的运行时含义、增量消息长什么样、改文件/改技能后缓存怎么算，
+> 见附录 [`instruction-delta-and-cache.md`](./instruction-delta-and-cache.md)。
 
 ### 5.5.2 System prompt 的两段
 
