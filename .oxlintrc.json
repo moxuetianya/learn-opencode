@@ -162,6 +162,7 @@
     ".pi/**",
     ".roo/**",
     ".windsurf/**",
+    "third/**",
     "script/oxlint/anti-slop/**"
   ]
 }
