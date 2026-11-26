@@ -34,6 +34,7 @@
 | 11 | [`11-service-lifecycle.md`](./11-service-lifecycle.md) | 后台服务生命周期：发现、拉起、停止、重启恢复 |
 | 12 | [`12-background-task-notify.md`](./12-background-task-notify.md) | 后台任务完成通知与自动唤醒 |
 | 13 | [`13-plugin-loading-pipeline.md`](./13-plugin-loading-pipeline.md) | 插件系统全链路：TUI/Server 双端加载、Effect Layer 依赖图、入口与目录 |
+| 14 | [`14-command-mechanism.md`](./14-command-mechanism.md) | 命令机制：Command 注册表、md/MCP/内置三条装填管线、模板求值与 subagent 派生、本地命令 vs server 命令 |
 | 附 | [`code-navigation.md`](./code-navigation.md) | V2 代码地图 |
 | 附 | [`code-examples.md`](./code-examples.md) | V2 API / 插件 / 配置示例 |
 | 附 | [`QA.md`](./QA.md) | 学习问答：steer/queue、execution、drain、收件箱与控制项；构建/channel、配置与数据目录、多实例定制、location 与环境变量 |
@@ -56,6 +57,7 @@
 ```
 
 想搞清插件**是怎么被发现、安装、加载、热重载**的（含双端入口与目录规则），再读 **13（插件全链路）**。
+想给输入框**加斜杠命令**（md 文件 / `commands` 键 / 插件注册），读 **14（命令机制）**。
 
 不要在没读 06 的情况下直接抄旧版 `Hooks` 接口——V1 的 hook 名称已经全部改名。
 

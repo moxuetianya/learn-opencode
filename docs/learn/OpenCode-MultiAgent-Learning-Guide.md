@@ -145,6 +145,15 @@ interface Snapshot {
 加载顺序：内置 `pre` → SDK/实例插件 → 内置 `post` → 配置声明的外部插件
 （顺序与覆盖规则见第 06 课）。
 
+### 3.4 斜杠命令：一张注册表，三条装填管线
+
+`Command.Service`（`core/src/command.ts`）是 location 级的 `Map<name, Definition>`，
+`init`/`review`、MCP prompt 命令、`.opencode/command/**/*.md` 自定义命令全部经
+`ctx.command.transform` 落进同一张表，执行终点都是 `session.prompt`；
+`pre` 的内置命令可被 `post` 的同名自定义命令覆盖。
+TUI/App 的 `/new`、`/models` 等本地命令则注册在客户端 keymap 系统，不经过它。
+细节见第 14 课。
+
 ---
 
 ## 四、上下文、压缩与记忆
